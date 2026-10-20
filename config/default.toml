@@ -1,0 +1,26 @@
+---
+name: warden-config-toml
+description: Default configuration for Warden rule engine
+metadata:
+  type: reference
+---
+# Rule engine configuration
+block_tools = ["shell.execute"]
+allow_tools = []
+
+# Regular expression patterns for paths that should be blocked.
+# Uses Rust regex syntax.
+path_block_patterns = [
+    "/etc/.*",
+    "~/.ssh/.*",
+    ".*\\.env$",
+    ".*/\\.aws/credentials"
+]
+
+# Regular expression patterns for dangerous command strings.
+cmd_block_patterns = [
+    "rm -rf /",
+    "curl.*\\|\\s*sh",
+    "dd of=",
+    "chmod 777"
+]
