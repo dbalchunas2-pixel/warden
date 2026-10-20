@@ -1,26 +1,46 @@
----
-name: warden-config-toml
-description: Default configuration for Warden rule engine
-metadata:
-  type: reference
----
-# Rule engine configuration
-block_tools = ["shell.execute"]
-allow_tools = []
+# Warden MCP Security Gateway - Default Configuration
 
-# Regular expression patterns for paths that should be blocked.
-# Uses Rust regex syntax.
+# Upstream MCP server command (the server Warden proxies to)
+# Example: "node /path/to/mcp-server.js"
+upstream_command = "echo"
+
+# Nebius Token Factory settings
+[nebius]
+model = "nvidia/Nemotron-3_5_Lightning"
+base_url = "https://api.tokenfactory.nebius.com/v1/"
+api_key_env = "NEBIUS_API_KEY"
+max_context_chars = 4096
+confidence_threshold = 0.7
+
+# Rule engine settings
+[rules]
+# Tool names to always block (bypass LLM)
+block_tools = []
+# Tool names to always allow (bypass LLM)
+allow_tools = ["tools/list", "initialize", "notifications/initialized"]
+# Regex patterns for path arguments that should block
 path_block_patterns = [
-    "/etc/.*",
-    "~/.ssh/.*",
-    ".*\\.env$",
-    ".*/\\.aws/credentials"
+  "/etc/.*",
+  "~/.ssh/.*",
+  ".*\\.env$",
+  ".*/\\.aws/credentials",
+  ".*/\\.npmrc",
+  ".*/\\.git-credentials",
+]
+# Regex patterns for dangerous command strings
+cmd_block_patterns = [
+  "rm .*-rf .*/",
+  "curl.*\\|.*sh",
+  "wget.*\\|.*sh",
+  "dd of=",
+  "chmod 777",
+  "mkfs",
+  "shutdown",
+  "reboot",
+  "halt",
+  "kill -9",
 ]
 
-# Regular expression patterns for dangerous command strings.
-cmd_block_patterns = [
-    "rm -rf /",
-    "curl.*\\|\\s*sh",
-    "dd of=",
-    "chmod 777"
-]
+# Audit log settings
+[audit]
+log_path = "./warden-audit.jsonl"

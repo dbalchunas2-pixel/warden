@@ -1,9 +1,3 @@
----
-name: warden-rules-rs
-description: Rule engine implementation for Warden
-metadata:
-  type: reference
----
 use anyhow::Result;
 use regex::Regex;
 use serde_json::Value;
@@ -72,26 +66,26 @@ impl RuleEngine {
         if self.block_tools.iter().any(|t| t == method) {
             return Some(Decision {
                 allow: false,
-                reason: "Blocked by rule engine (explicit block).".into(),
+                reason: "Blocked by rule engine (explicit block)".into(),
             });
         }
         if self.allow_tools.iter().any(|t| t == method) {
             return Some(Decision {
                 allow: true,
-                reason: "Allowed by rule engine (explicit allow).".into(),
+                reason: "Allowed by rule engine (explicit allow)".into(),
             });
         }
 
         // Inspect string fields in params for patterns
         if let Some(strings) = extract_string_fields(params) {
-            for s in strings {
-                if self.path_block_patterns.iter().any(|re| re.is_match(&s)) {
+            for s in &strings {
+                if self.path_block_patterns.iter().any(|re| re.is_match(s)) {
                     return Some(Decision {
                         allow: false,
                         reason: format!("Path pattern blocked: {}", s),
                     });
                 }
-                if self.cmd_block_patterns.iter().any(|re| re.is_match(&s)) {
+                if self.cmd_block_patterns.iter().any(|re| re.is_match(s)) {
                     return Some(Decision {
                         allow: false,
                         reason: format!("Command pattern blocked: {}", s),
