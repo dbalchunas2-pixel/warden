@@ -18,7 +18,7 @@ pub struct Classification {
 }
 
 const NEBIUS_BASE_URL: &str = "https://api.tokenfactory.nebius.com/v1/";
-const NEBIUS_MODEL: &str = "nvidia/Nemotron-3_5_Lightning";
+const NEBIUS_MODEL: &str = "nvidia/Nemotron-3_5-Lightning";
 
 const SYSTEM_PROMPT: &str = r#"You are Warden, a security classification engine for AI agent tool calls via the Model Context Protocol (MCP).
 
@@ -58,7 +58,7 @@ pub async fn classify_tool_call(method: &str, params: &Value) -> Result<Classifi
             {"role": "user", "content": user_msg}
         ],
         "temperature": 0.1,
-        "max_tokens": 256,
+        "max_tokens": 4096,
     });
 
     let client = Client::new();
