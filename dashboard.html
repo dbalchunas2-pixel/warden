@@ -5,126 +5,142 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Warden — MCP Security Gateway</title>
 <style>
-@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Instrument+Serif&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Instrument+Serif:ital@0;1&display=swap');
 
 :root {
-  --bg: #0a0b0d;
-  --panel: #121417;
-  --border: #1e2125;
+  --bg: #08090a;
+  --panel: #0f1113;
+  --panel2: #131619;
+  --border: #1c1f23;
+  --border-hi: #2a2e33;
   --text: #e4e6ea;
-  --dim: #6b7280;
+  --dim: #5c6370;
   --accent: #00ff9f;
-  --accent-dim: #00ff9f15;
+  --accent-d: rgba(0,255,159,0.08);
   --danger: #ff3b5c;
-  --danger-dim: #ff3b5c15;
+  --danger-d: rgba(255,59,92,0.08);
   --warn: #ffb800;
-  --warn-dim: #ffb80015;
-  --font-mono: 'JetBrains Mono', monospace;
-  --font-display: 'Instrument Serif', serif;
+  --warn-d: rgba(255,184,0,0.08);
+  --orange: #ff6b35;
+  --mono: 'JetBrains Mono', monospace;
+  --serif: 'Instrument Serif', serif;
 }
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background:var(--bg); color:var(--text); font-family:var(--mono); font-size:13px; min-height:100vh; }
+body::before { content:''; position:fixed; inset:0; background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='200'%3E%3Cfilter id='n'%3E%3CfeTurbulence baseFrequency='0.9'/%3E%3C/filter%3E%3Crect width='200' height='200' filter='url(%23n)' opacity='0.02'/%3E%3C/svg%3E"); pointer-events:none; z-index:9999; }
 
-* { margin: 0; padding: 0; box-sizing: border-box; }
+/* Header */
+header { border-bottom:1px solid var(--border); padding:16px 28px; display:flex; align-items:center; justify-content:space-between; background:linear-gradient(180deg,#0c0d0f,var(--bg)); position:sticky; top:0; z-index:100; backdrop-filter:blur(10px); }
+.logo { display:flex; align-items:baseline; gap:12px; }
+.logo-mark { font-family:var(--serif); font-size:30px; color:var(--accent); letter-spacing:-1px; }
+.logo-sub { font-size:10px; color:var(--dim); text-transform:uppercase; letter-spacing:2px; }
+.nav { display:flex; gap:4px; }
+.nav-btn { padding:8px 16px; font-size:11px; color:var(--dim); background:none; border:1px solid transparent; border-radius:6px; cursor:pointer; font-family:var(--mono); text-transform:uppercase; letter-spacing:1px; transition:all 0.2s; }
+.nav-btn:hover { color:var(--text); border-color:var(--border); }
+.nav-btn.active { color:var(--accent); border-color:var(--accent); background:var(--accent-d); }
+.status-pill { display:flex; align-items:center; gap:8px; padding:6px 14px; border:1px solid var(--border); border-radius:20px; font-size:11px; color:var(--dim); }
+.status-dot { width:7px; height:7px; border-radius:50%; background:var(--accent); animation:pulse 2s infinite; }
+@keyframes pulse { 0%,100%{opacity:1;box-shadow:0 0 8px var(--accent)} 50%{opacity:.4} }
 
-body {
-  background: var(--bg);
-  color: var(--text);
-  font-family: var(--font-mono);
-  font-size: 13px;
-  min-height: 100vh;
-  overflow-x: hidden;
-}
+/* Views */
+.view { display:none; }
+.view.active { display:block; }
 
-body::before {
-  content: '';
-  position: fixed;
-  inset: 0;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='200'%3E%3Cfilter id='n'%3E%3CfeTurbulence baseFrequency='0.9' /%3E%3C/filter%3E%3Crect width='200' height='200' filter='url(%23n)' opacity='0.03'/%3E%3C/svg%3E");
-  pointer-events: none;
-  z-index: 9999;
-}
+/* Stats */
+.stats { display:grid; grid-template-columns:repeat(5,1fr); gap:1px; background:var(--border); border-bottom:1px solid var(--border); }
+.stat { background:var(--panel); padding:16px 22px; }
+.stat-label { font-size:9px; color:var(--dim); text-transform:uppercase; letter-spacing:1.5px; margin-bottom:4px; }
+.stat-value { font-family:var(--serif); font-size:34px; line-height:1; }
+.stat-value.allow { color:var(--accent); }
+.stat-value.block { color:var(--danger); }
+.stat-value.warn { color:var(--warn); }
+.stat-trend { font-size:10px; color:var(--dim); margin-top:2px; }
 
-header {
-  border-bottom: 1px solid var(--border);
-  padding: 20px 32px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  background: linear-gradient(180deg, #0d0e10, var(--bg));
-}
-.logo { display: flex; align-items: baseline; gap: 12px; }
-.logo-mark { font-family: var(--font-display); font-size: 32px; color: var(--accent); letter-spacing: -1px; }
-.logo-sub { font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: 2px; }
-.status-pill { display: flex; align-items: center; gap: 8px; padding: 6px 14px; border: 1px solid var(--border); border-radius: 20px; font-size: 11px; color: var(--dim); }
-.status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); animation: pulse 2s ease-in-out infinite; }
-@keyframes pulse {
-  0%, 100% { opacity: 1; box-shadow: 0 0 8px var(--accent); }
-  50% { opacity: 0.4; box-shadow: 0 0 2px var(--accent); }
-}
+/* Layout */
+.main { display:grid; grid-template-columns:1fr 340px; min-height:calc(100vh - 120px); }
 
-.stats {
-  display: grid;
-  grid-template-columns: repeat(5, 1fr);
-  gap: 1px;
-  background: var(--border);
-  border-bottom: 1px solid var(--border);
-}
-.stat { background: var(--panel); padding: 18px 24px; }
-.stat-label { font-size: 10px; color: var(--dim); text-transform: uppercase; letter-spacing: 1.5px; margin-bottom: 6px; }
-.stat-value { font-family: var(--font-display); font-size: 36px; color: var(--text); line-height: 1; }
-.stat-value.allow { color: var(--accent); }
-.stat-value.block { color: var(--danger); }
-.stat-value.warn { color: var(--warn); }
+/* Live Feed */
+.feed-section { border-right:1px solid var(--border); padding:18px 22px; overflow-y:auto; max-height:calc(100vh - 120px); }
+.section-title { font-size:10px; color:var(--dim); text-transform:uppercase; letter-spacing:2px; margin-bottom:14px; display:flex; align-items:center; gap:8px; }
+.section-title::before { content:''; width:3px; height:12px; background:var(--accent); border-radius:1px; }
+.feed { display:flex; flex-direction:column; gap:5px; }
+.entry { display:grid; grid-template-columns:64px 1fr 70px 60px; gap:10px; align-items:center; padding:9px 12px; background:var(--panel); border:1px solid var(--border); border-radius:5px; animation:slideIn 0.3s; transition:border-color 0.15s; }
+.entry:hover { border-color:var(--border-hi); }
+.entry.blocked { border-left:3px solid var(--danger); }
+.entry.allowed { border-left:3px solid var(--accent); }
+@keyframes slideIn { from{opacity:0;transform:translateX(-6px)} to{opacity:1} }
+.entry-time { font-size:9px; color:var(--dim); }
+.entry-method { font-weight:500; font-size:11px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.entry-reason { font-size:9px; color:var(--dim); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; margin-top:1px; }
+.entry-verdict { font-size:9px; font-weight:700; text-transform:uppercase; letter-spacing:1px; text-align:center; padding:3px 6px; border-radius:3px; }
+.entry-verdict.blocked { color:var(--danger); background:var(--danger-d); }
+.entry-verdict.allowed { color:var(--accent); background:var(--accent-d); }
+.entry-layer { font-size:8px; color:var(--dim); text-align:right; }
 
-.main { display: grid; grid-template-columns: 1fr 360px; min-height: calc(100vh - 200px); }
+/* Right panel */
+.right-panel { display:flex; flex-direction:column; }
+.panel-section { padding:16px 22px; border-bottom:1px solid var(--border); }
 
-.feed-section { border-right: 1px solid var(--border); padding: 20px 24px; }
-.section-title { font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: 2px; margin-bottom: 16px; display: flex; align-items: center; gap: 8px; }
-.section-title::before { content: ''; width: 4px; height: 14px; background: var(--accent); }
+/* Charts */
+.chart-row { display:flex; align-items:center; gap:10px; margin-bottom:6px; }
+.chart-label { font-size:10px; width:110px; color:var(--dim); }
+.chart-track { flex:1; height:5px; background:var(--border); border-radius:3px; overflow:hidden; }
+.chart-fill { height:100%; border-radius:3px; transition:width 0.4s; }
+.chart-count { font-size:10px; width:24px; text-align:right; }
 
-.feed { display: flex; flex-direction: column; gap: 6px; }
-.entry {
-  display: grid;
-  grid-template-columns: 70px 1fr 80px 80px;
-  gap: 12px;
-  align-items: center;
-  padding: 10px 14px;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  animation: slideIn 0.3s ease;
-  transition: border-color 0.2s;
-}
-.entry:hover { border-color: #2a2e33; }
-.entry.blocked { border-left: 3px solid var(--danger); }
-.entry.allowed { border-left: 3px solid var(--accent); }
-@keyframes slideIn {
-  from { opacity: 0; transform: translateX(-8px); }
-  to { opacity: 1; transform: translateX(0); }
-}
-.entry-time { font-size: 10px; color: var(--dim); }
-.entry-method { font-weight: 500; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.entry-reason { font-size: 10px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.entry-verdict { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; text-align: center; padding: 3px 8px; border-radius: 3px; }
-.entry-verdict.blocked { color: var(--danger); background: var(--danger-dim); }
-.entry-verdict.allowed { color: var(--accent); background: var(--accent-dim); }
-.entry-layer { font-size: 9px; color: var(--dim); text-align: right; }
+/* Sparkline */
+.sparkline { width:100%; height:60px; margin-top:8px; }
 
-.right-panel { display: flex; flex-direction: column; }
-.panel-section { padding: 20px 24px; border-bottom: 1px solid var(--border); }
-.category-bar { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
-.category-label { font-size: 11px; width: 120px; color: var(--dim); }
-.category-track { flex: 1; height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; }
-.category-fill { height: 100%; border-radius: 3px; transition: width 0.5s ease; }
-.category-count { font-size: 11px; color: var(--text); width: 28px; text-align: right; }
+/* Rule editor */
+.rule-list { display:flex; flex-direction:column; gap:4px; }
+.rule-item { display:flex; align-items:center; gap:8px; padding:6px 10px; background:var(--bg); border:1px solid var(--border); border-radius:4px; font-size:11px; }
+.rule-type { font-size:8px; text-transform:uppercase; padding:2px 5px; border-radius:2px; font-weight:700; }
+.rule-type.path { color:var(--warn); background:var(--warn-d); }
+.rule-type.cmd { color:var(--danger); background:var(--danger-d); }
+.rule-pattern { color:var(--text); flex:1; font-size:10px; }
+.rule-del { background:none; border:none; color:var(--dim); cursor:pointer; font-size:14px; padding:0 4px; }
+.rule-del:hover { color:var(--danger); }
+.rule-add { display:flex; gap:6px; margin-top:8px; }
+.rule-add select, .rule-add input { background:var(--bg); border:1px solid var(--border); color:var(--text); padding:6px 8px; border-radius:4px; font-family:var(--mono); font-size:11px; }
+.rule-add input { flex:1; }
+.rule-add button { padding:6px 12px; background:var(--accent-d); border:1px solid var(--accent); color:var(--accent); border-radius:4px; cursor:pointer; font-family:var(--mono); font-size:11px; font-weight:700; }
+.rule-add button:hover { background:var(--accent); color:var(--bg); }
 
-.config-block { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 12px; font-size: 11px; max-height: 200px; overflow-y: auto; }
-.config-block pre { font-family: var(--font-mono); white-space: pre-wrap; color: var(--dim); line-height: 1.5; }
-.config-key { color: var(--accent); }
-.config-val { color: var(--text); }
-.config-comment { color: #444; }
+/* Audit table */
+.audit-table { width:100%; border-collapse:collapse; font-size:11px; }
+.audit-table th { text-align:left; padding:8px 12px; color:var(--dim); font-size:9px; text-transform:uppercase; letter-spacing:1px; border-bottom:1px solid var(--border); position:sticky; top:0; background:var(--bg); }
+.audit-table td { padding:7px 12px; border-bottom:1px solid var(--border); }
+.audit-table tr:hover { background:var(--panel); }
+.filter-bar { display:flex; gap:10px; margin-bottom:14px; align-items:center; }
+.filter-bar input, .filter-bar select { background:var(--panel); border:1px solid var(--border); color:var(--text); padding:7px 10px; border-radius:5px; font-family:var(--mono); font-size:11px; }
+.filter-bar input { flex:1; }
+.badge { font-size:9px; padding:2px 7px; border-radius:3px; font-weight:700; text-transform:uppercase; }
+.badge.blocked { color:var(--danger); background:var(--danger-d); }
+.badge.allowed { color:var(--accent); background:var(--accent-d); }
 
-.empty { text-align: center; padding: 60px 20px; color: var(--dim); font-size: 13px; }
-.empty-mark { font-family: var(--font-display); font-size: 48px; color: var(--border); margin-bottom: 12px; }
+/* Tester */
+.tester { max-width:600px; margin:0 auto; padding:28px; }
+.tester-field { margin-bottom:14px; }
+.tester-label { font-size:10px; color:var(--dim); text-transform:uppercase; letter-spacing:1px; margin-bottom:5px; }
+.tester input, .tester textarea { width:100%; background:var(--panel); border:1px solid var(--border); color:var(--text); padding:10px 14px; border-radius:6px; font-family:var(--mono); font-size:12px; resize:vertical; }
+.tester textarea { min-height:80px; }
+.tester button { padding:10px 24px; background:var(--accent); color:var(--bg); border:none; border-radius:6px; font-family:var(--mono); font-weight:700; font-size:12px; cursor:pointer; text-transform:uppercase; letter-spacing:1px; }
+.tester button:hover { opacity:0.85; }
+.tester-result { margin-top:18px; padding:16px; border-radius:6px; display:none; }
+.tester-result.show { display:block; }
+.tester-result.allowed { background:var(--accent-d); border:1px solid var(--accent); }
+.tester-result.blocked { background:var(--danger-d); border:1px solid var(--danger); }
+.tester-result h3 { font-size:12px; margin-bottom:8px; }
+.tester-result.allowed h3 { color:var(--accent); }
+.tester-result.blocked h3 { color:var(--danger); }
+.tester-result p { font-size:11px; color:var(--dim); line-height:1.5; }
+.tester-meta { display:flex; gap:14px; margin-top:8px; }
+.tester-meta span { font-size:10px; color:var(--dim); }
+.tester-meta b { color:var(--text); }
+
+/* Empty */
+.empty { text-align:center; padding:50px 20px; color:var(--dim); }
+.empty-mark { font-family:var(--serif); font-size:42px; color:var(--border); margin-bottom:10px; }
 </style>
 </head>
 <body>
@@ -134,126 +150,272 @@ header {
     <span class="logo-mark">Warden</span>
     <span class="logo-sub">MCP Security Gateway</span>
   </div>
-  <div class="status-pill">
-    <span class="status-dot"></span>
-    <span id="status-text">Monitoring</span>
+  <div class="nav">
+    <button class="nav-btn active" onclick="showView('overview')">Overview</button>
+    <button class="nav-btn" onclick="showView('audit')">Audit Log</button>
+    <button class="nav-btn" onclick="showView('rules')">Rules</button>
+    <button class="nav-btn" onclick="showView('tester')">Tester</button>
   </div>
+  <div class="status-pill"><span class="status-dot"></span><span id="status-text">Live</span></div>
 </header>
 
-<div class="stats">
-  <div class="stat"><div class="stat-label">Total Calls</div><div class="stat-value" id="stat-total">0</div></div>
-  <div class="stat"><div class="stat-label">Allowed</div><div class="stat-value allow" id="stat-allowed">0</div></div>
-  <div class="stat"><div class="stat-label">Blocked</div><div class="stat-value block" id="stat-blocked">0</div></div>
-  <div class="stat"><div class="stat-label">Block Rate</div><div class="stat-value warn" id="stat-rate">0%</div></div>
-  <div class="stat"><div class="stat-label">Active Rules</div><div class="stat-value" id="stat-rules">14</div></div>
-</div>
-
-<div class="main">
-  <div class="feed-section">
-    <div class="section-title">Live Tool Call Feed</div>
-    <div class="feed" id="feed">
-      <div class="empty"><div class="empty-mark">○</div><div>Waiting for tool calls...</div><div style="margin-top:6px;font-size:11px;">Run Warden and events will appear here</div></div>
+<!-- Overview -->
+<div class="view active" id="view-overview">
+  <div class="stats">
+    <div class="stat"><div class="stat-label">Total Calls</div><div class="stat-value" id="s-total">0</div><div class="stat-trend" id="s-total-trend"></div></div>
+    <div class="stat"><div class="stat-label">Allowed</div><div class="stat-value allow" id="s-allow">0</div><div class="stat-trend" id="s-allow-trend"></div></div>
+    <div class="stat"><div class="stat-label">Blocked</div><div class="stat-value block" id="s-block">0</div><div class="stat-trend" id="s-block-trend"></div></div>
+    <div class="stat"><div class="stat-label">Block Rate</div><div class="stat-value warn" id="s-rate">0%</div><div class="stat-trend" id="s-rate-trend"></div></div>
+    <div class="stat"><div class="stat-label">Active Rules</div><div class="stat-value" id="s-rules">0</div><div class="stat-trend" id="s-rules-trend"></div></div>
+  </div>
+  <div class="main">
+    <div class="feed-section">
+      <div class="section-title">Live Tool Call Feed</div>
+      <div class="feed" id="feed">
+        <div class="empty"><div class="empty-mark">○</div><div>Waiting for tool calls...</div></div>
+      </div>
+    </div>
+    <div class="right-panel">
+      <div class="panel-section">
+        <div class="section-title">Threat Categories</div>
+        <div id="categories"></div>
+      </div>
+      <div class="panel-section">
+        <div class="section-title">Block Rate Over Time</div>
+        <svg class="sparkline" id="sparkline" viewBox="0 0 300 60"></svg>
+      </div>
+      <div class="panel-section">
+        <div class="section-title">System Info</div>
+        <div style="font-size:11px;color:var(--dim);line-height:1.7">
+          <div>Model: <span style="color:var(--text)">Nemotron-3.5-Lightning</span></div>
+          <div>Threshold: <span style="color:var(--text)">0.70</span></div>
+          <div>Backend: <span style="color:var(--text)">Nebius Token Factory</span></div>
+          <div>Protocol: <span style="color:var(--text)">MCP JSON-RPC 2.0</span></div>
+        </div>
+      </div>
     </div>
   </div>
+</div>
 
-  <div class="right-panel">
-    <div class="panel-section">
-      <div class="section-title">Threat Categories</div>
-      <div id="categories">
-        <div class="category-bar"><span class="category-label">safe</span><div class="category-track"><div class="category-fill" style="width:0%;background:var(--accent)"></div></div><span class="category-count">0</span></div>
-        <div class="category-bar"><span class="category-label">credential_access</span><div class="category-track"><div class="category-fill" style="width:0%;background:var(--danger)"></div></div><span class="category-count">0</span></div>
-        <div class="category-bar"><span class="category-label">data_exfiltration</span><div class="category-track"><div class="category-fill" style="width:0%;background:#ff6b35"></div></div><span class="category-count">0</span></div>
-        <div class="category-bar"><span class="category-label">destructive</span><div class="category-track"><div class="category-fill" style="width:0%;background:var(--danger)"></div></div><span class="category-count">0</span></div>
-        <div class="category-bar"><span class="category-label">prompt_injection</span><div class="category-track"><div class="category-fill" style="width:0%;background:var(--warn)"></div></div><span class="category-count">0</span></div>
-        <div class="category-bar"><span class="category-label">privilege_esc.</span><div class="category-track"><div class="category-fill" style="width:0%;background:#ff6b35"></div></div><span class="category-count">0</span></div>
-        <div class="category-bar"><span class="category-label">other</span><div class="category-track"><div class="category-fill" style="width:0%;background:var(--dim)"></div></div><span class="category-count">0</span></div>
-      </div>
+<!-- Audit Log -->
+<div class="view" id="view-audit">
+  <div style="padding:18px 22px">
+    <div class="section-title">Audit Log</div>
+    <div class="filter-bar">
+      <input type="text" id="audit-search" placeholder="Search method or reason..." oninput="renderAudit()">
+      <select id="audit-filter" onchange="renderAudit()">
+        <option value="">All verdicts</option>
+        <option value="blocked">Blocked only</option>
+        <option value="allowed">Allowed only</option>
+      </select>
     </div>
+    <table class="audit-table">
+      <thead><tr><th>Time</th><th>Method</th><th>Reason</th><th>Verdict</th><th>Layer</th></tr></thead>
+      <tbody id="audit-body"></tbody>
+    </table>
+  </div>
+</div>
 
-    <div class="panel-section">
-      <div class="section-title">Active Rule Patterns</div>
-      <div class="config-block">
-        <pre><span class="config-comment"># Path blocks</span>
-<span class="config-key">/etc/.*</span>
-<span class="config-key">~/.ssh/.*</span>
-<span class="config-key">*.env</span>
-<span class="config-key">*.aws/credentials</span>
-<span class="config-key">*.npmrc</span>
-<span class="config-key">*.git-credentials</span>
+<!-- Rules -->
+<div class="view" id="view-rules">
+  <div style="padding:18px 22px;max-width:700px">
+    <div class="section-title">Active Rule Patterns</div>
+    <div class="rule-list" id="rule-list"></div>
+    <div class="rule-add">
+      <select id="rule-type-add">
+        <option value="path">Path</option>
+        <option value="cmd">Command</option>
+      </select>
+      <input type="text" id="rule-pattern-add" placeholder="regex pattern...">
+      <button onclick="addRule()">Add</button>
+    </div>
+  </div>
+</div>
 
-<span class="config-comment"># Command blocks</span>
-<span class="config-key">rm -rf /</span>
-<span class="config-key">curl|sh</span>
-<span class="config-key">dd of=</span>
-<span class="config-key">chmod 777</span>
-<span class="config-key">mkfs</span>
-<span class="config-key">shutdown</span>
-<span class="config-key">reboot</span>
-<span class="config-key">kill -9</span>
-
-<span class="config-comment"># Model</span>
-<span class="config-val">nvidia/Nemotron-3.5-Lightning</span>
-<span class="config-comment"># Confidence threshold: 0.7</span></pre>
-      </div>
+<!-- Tester -->
+<div class="view" id="view-tester">
+  <div class="tester">
+    <div class="section-title">Tool Call Tester</div>
+    <p style="color:var(--dim);font-size:11px;margin-bottom:20px">Manually test a tool call through Warden's security pipeline.</p>
+    <div class="tester-field">
+      <div class="tester-label">Tool Name</div>
+      <input type="text" id="test-method" placeholder="tools/call" value="tools/call">
+    </div>
+    <div class="tester-field">
+      <div class="tester-label">Arguments (JSON)</div>
+      <textarea id="test-params" placeholder='{"name":"shell.execute","arguments":{"command":"ls -la"}}'>{"name":"filesystem.read","arguments":{"path":"/etc/passwd"}}</textarea>
+    </div>
+    <button onclick="runTest()">Test Call</button>
+    <div class="tester-result" id="test-result">
+      <h3 id="test-verdict"></h3>
+      <p id="test-reason"></p>
+      <div class="tester-meta" id="test-meta"></div>
     </div>
   </div>
 </div>
 
 <script>
-const feed = document.getElementById('feed');
-let stats = { total: 0, allowed: 0, blocked: 0, categories: {} };
+let entries = [];
+let rules = [];
+const catColors = { safe:'var(--accent)', credential_access:'var(--danger)', data_exfiltration:'var(--orange)', destructive:'var(--danger)', prompt_injection:'var(--warn)', privilege_escalation:'var(--orange)', other:'var(--dim)' };
+const catLabels = ['safe','credential_access','data_exfiltration','destructive','prompt_injection','privilege_escalation','other'];
+let sparkData = [];
 
-function parseAuditLog() {
-  fetch('/api/audit')
-    .then(r => r.json())
-    .then(entries => {
-      if (entries.length === 0) return;
-      feed.innerHTML = '';
-      entries.forEach(e => addEntry(e));
-      updateStats(entries);
-    })
-    .catch(() => {});
+// SSE for live events
+const evtSource = new EventSource('/api/events');
+evtSource.onmessage = (e) => {
+  const entry = JSON.parse(e.data);
+  entries.unshift(entry);
+  if (entries.length > 200) entries.pop();
+  addFeedEntry(entry);
+  updateStats();
+  if (document.getElementById('view-audit').classList.contains('active')) renderAudit();
+};
+
+function showView(name) {
+  document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+  document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('view-' + name).classList.add('active');
+  event.target.classList.add('active');
+  if (name === 'audit') renderAudit();
+  if (name === 'rules') renderRules();
 }
 
-function addEntry(entry) {
+function addFeedEntry(entry) {
+  const feed = document.getElementById('feed');
   if (feed.querySelector('.empty')) feed.innerHTML = '';
   const el = document.createElement('div');
-  const verdict = entry.verdict || 'blocked';
-  el.className = 'entry ' + verdict;
-  const time = entry.timestamp ? new Date(entry.timestamp).toLocaleTimeString('en-US', {hour12:false}) : '--:--:--';
-  const method = entry.method || 'unknown';
-  const reason = entry.reason || '';
-  const layer = reason.includes('rule') || reason.includes('Rule') ? 'RULES' : reason.includes('LLM') || reason.includes('Nemotron') ? 'LLM' : '';
-  el.innerHTML = '<div class="entry-time">' + time + '</div><div><div class="entry-method">' + method + '</div><div class="entry-reason">' + reason + '</div></div><div class="entry-verdict ' + verdict + '">' + verdict + '</div><div class="entry-layer">' + layer + '</div>';
+  const v = entry.verdict || 'blocked';
+  el.className = 'entry ' + v;
+  const t = entry.timestamp ? new Date(entry.timestamp).toLocaleTimeString('en-US',{hour12:false}) : '--:--:--';
+  const m = entry.method || '?';
+  const r = entry.reason || '';
+  const layer = r.includes('rule')||r.includes('Rule') ? 'RULES' : r.includes('LLM')||r.includes('Nemotron') ? 'LLM' : '';
+  el.innerHTML = '<div class="entry-time">'+t+'</div><div><div class="entry-method">'+esc(m)+'</div><div class="entry-reason">'+esc(r)+'</div></div><div class="entry-verdict '+v+'">'+v+'</div><div class="entry-layer">'+layer+'</div>';
   feed.insertBefore(el, feed.firstChild);
-  while (feed.children.length > 50) feed.removeChild(feed.lastChild);
+  while (feed.children.length > 100) feed.removeChild(feed.lastChild);
 }
 
-function updateStats(entries) {
-  stats.total = entries.length;
-  stats.allowed = entries.filter(e => e.verdict === 'allowed').length;
-  stats.blocked = entries.filter(e => e.verdict === 'blocked').length;
-  stats.categories = {};
+function updateStats() {
+  const total = entries.length;
+  const allowed = entries.filter(e => e.verdict === 'allowed').length;
+  const blocked = entries.filter(e => e.verdict === 'blocked').length;
+  const rate = total ? Math.round(blocked/total*100) : 0;
+  document.getElementById('s-total').textContent = total;
+  document.getElementById('s-allow').textContent = allowed;
+  document.getElementById('s-block').textContent = blocked;
+  document.getElementById('s-rate').textContent = rate + '%';
+  document.getElementById('s-rules').textContent = rules.length;
+
+  // Categories
+  const cats = {};
   entries.forEach(e => {
-    const cat = (e.reason || '').match(/category[:\s]+(\w+)/i);
-    const c = cat ? cat[1] : (e.verdict === 'allowed' ? 'safe' : 'other');
-    stats.categories[c] = (stats.categories[c] || 0) + 1;
+    const m = (e.reason||'').match(/category[:\s]+(\w+)/i);
+    const c = m ? m[1] : (e.verdict === 'allowed' ? 'safe' : 'other');
+    cats[c] = (cats[c]||0)+1;
   });
-  document.getElementById('stat-total').textContent = stats.total;
-  document.getElementById('stat-allowed').textContent = stats.allowed;
-  document.getElementById('stat-blocked').textContent = stats.blocked;
-  document.getElementById('stat-rate').textContent = stats.total ? Math.round(stats.blocked / stats.total * 100) + '%' : '0%';
-  const maxCat = Math.max(...Object.values(stats.categories), 1);
-  document.querySelectorAll('.category-bar').forEach(bar => {
-    const label = bar.querySelector('.category-label').textContent.replace('privilege_esc.', 'privilege_escalation');
-    const count = stats.categories[label] || 0;
-    bar.querySelector('.category-fill').style.width = (count / maxCat * 100) + '%';
-    bar.querySelector('.category-count').textContent = count;
+  const maxC = Math.max(...Object.values(cats), 1);
+  let html = '';
+  catLabels.forEach(c => {
+    const n = cats[c] || 0;
+    html += '<div class="chart-row"><span class="chart-label">'+c.replace('privilege_escalation','priv_esc.')+'</span><div class="chart-track"><div class="chart-fill" style="width:'+(n/maxC*100)+'%;background:'+(catColors[c]||'var(--dim)')+'"></div></div><span class="chart-count">'+n+'</span></div>';
   });
+  document.getElementById('categories').innerHTML = html;
+
+  // Sparkline - block rate over last 20 entries
+  sparkData.push(rate);
+  if (sparkData.length > 30) sparkData.shift();
+  drawSparkline();
 }
 
-parseAuditLog();
-setInterval(parseAuditLog, 1000);
+function drawSparkline() {
+  const svg = document.getElementById('sparkline');
+  if (sparkData.length < 2) { svg.innerHTML = ''; return; }
+  const w = 300, h = 60, max = 100;
+  const pts = sparkData.map((v,i) => (i/(sparkData.length-1))*w + ',' + (h - (v/max)*h));
+  const path = 'M' + pts.join(' L');
+  const area = path + ' L'+w+','+h+' L0,'+h+' Z';
+  svg.innerHTML = '<path d="'+area+'" fill="rgba(255,184,0,0.08)"/><path d="'+path+'" stroke="var(--warn)" fill="none" stroke-width="1.5"/>';
+}
+
+function renderAudit() {
+  const search = document.getElementById('audit-search').value.toLowerCase();
+  const filter = document.getElementById('audit-filter').value;
+  let filtered = entries.filter(e => {
+    if (filter && e.verdict !== filter) return false;
+    if (search && !(e.method||'').toLowerCase().includes(search) && !(e.reason||'').toLowerCase().includes(search)) return false;
+    return true;
+  });
+  let html = '';
+  filtered.forEach(e => {
+    const t = e.timestamp ? new Date(e.timestamp).toLocaleTimeString('en-US',{hour12:false}) : '--';
+    const layer = (e.reason||'').includes('rule')||((e.reason||'').includes('Rule')) ? 'RULES' : 'LLM';
+    html += '<tr><td>'+t+'</td><td>'+esc(e.method||'')+'</td><td style="color:var(--dim);max-width:400px;overflow:hidden;text-overflow:ellipsis">'+esc(e.reason||'')+'</td><td><span class="badge '+e.verdict+'">'+e.verdict+'</span></td><td style="color:var(--dim)">'+layer+'</td></tr>';
+  });
+  document.getElementById('audit-body').innerHTML = html || '<tr><td colspan=5 style="text-align:center;color:var(--dim);padding:30px">No entries</td></tr>';
+}
+
+function renderRules() {
+  fetch('/api/rules').then(r=>r.json()).then(r => {
+    rules = r;
+    document.getElementById('s-rules').textContent = rules.length;
+    let html = '';
+    r.forEach((rule,i) => {
+      html += '<div class="rule-item"><span class="rule-type '+rule.type+'">'+rule.type+'</span><span class="rule-pattern">'+esc(rule.pattern)+'</span><button class="rule-del" onclick="delRule('+i+')">×</button></div>';
+    });
+    document.getElementById('rule-list').innerHTML = html || '<div style="color:var(--dim);padding:14px">No rules configured</div>';
+  }).catch(()=>{});
+}
+
+function addRule() {
+  const type = document.getElementById('rule-type-add').value;
+  const pattern = document.getElementById('rule-pattern-add').value;
+  if (!pattern) return;
+  fetch('/api/rules', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({type,pattern})}).then(()=>renderRules());
+  document.getElementById('rule-pattern-add').value = '';
+}
+
+function delRule(idx) {
+  fetch('/api/rules/'+idx, {method:'DELETE'}).then(()=>renderRules());
+}
+
+function runTest() {
+  const method = document.getElementById('test-method').value;
+  const params = document.getElementById('test-params').value;
+  const result = document.getElementById('test-result');
+  result.className = 'tester-result';
+  result.classList.remove('show');
+  fetch('/api/test', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({method,params})})
+    .then(r => r.json())
+    .then(r => {
+      result.classList.add('show', r.verdict);
+      document.getElementById('test-verdict').textContent = r.verdict.toUpperCase();
+      document.getElementById('test-reason').textContent = r.reason || r.error || '';
+      const meta = document.getElementById('test-meta');
+      if (r.confidence !== undefined) {
+        meta.innerHTML = '<span>Confidence: <b>'+r.confidence+'</b></span><span>Category: <b>'+r.category+'</b></span><span>Layer: <b>'+(r.layer||'LLM')+'</b></span>';
+      } else { meta.innerHTML = ''; }
+    })
+    .catch(e => {
+      result.classList.add('show','blocked');
+      document.getElementById('test-verdict').textContent = 'ERROR';
+      document.getElementById('test-reason').textContent = e.toString();
+    });
+}
+
+function esc(s) { const d=document.createElement('div'); d.textContent=s; return d.innerHTML; }
+
+// Initial load
+fetch('/api/audit').then(r=>r.json()).then(data => {
+  entries = data.reverse();
+  if (entries.length > 0) {
+    document.getElementById('feed').innerHTML = '';
+    entries.reverse().forEach(e => addFeedEntry(e));
+    entries.reverse();
+    updateStats();
+  }
+}).catch(()=>{});
+fetch('/api/rules').then(r=>r.json()).then(r => { rules = r; document.getElementById('s-rules').textContent = rules.length; }).catch(()=>{});
 </script>
 </body>
 </html>
