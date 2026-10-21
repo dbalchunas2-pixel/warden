@@ -157,6 +157,10 @@ fn main() {
             commands::add_server,
             commands::remove_server,
             commands::client_snippet,
+            commands::explain_block,
+            commands::synthesize_rule,
+            commands::review_tools,
+            commands::summarize_audit,
         ])
         .setup(move |app| {
             use tauri::Emitter;

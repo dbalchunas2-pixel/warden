@@ -583,3 +583,79 @@ pub fn client_snippet(state: State<'_, Arc<AppState>>, name: String) -> Result<V
     }))
 }
 
+
+// ─── LLM-powered features (Nebius Nemotron) ────────────────────────────────
+
+/// Feature 1: Explain why a blocked call was blocked.
+#[tauri::command]
+pub async fn explain_block(
+    state: State<'_, Arc<AppState>>,
+    entry: Value,
+) -> Result<String, String> {
+    gate(&state)?;
+    let key = state.api_key().ok_or_else(|| {
+        "No Nebius API key configured. Add it in Security or setup to use LLM features.".to_string()
+    })?;
+    let method = entry.get("method").and_then(|v| v.as_str()).unwrap_or("");
+    let params = entry.get("params").cloned().unwrap_or(serde_json::Value::Null);
+    let reason = entry.get("reason").and_then(|v| v.as_str()).unwrap_or("");
+    let verdict = entry.get("verdict").and_then(|v| v.as_str()).unwrap_or("blocked");
+    crate::classify::explain_block(method, &params, reason, verdict, &key)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Feature 2: Convert a natural-language policy into a regex rule.
+#[tauri::command]
+pub async fn synthesize_rule(
+    state: State<'_, Arc<AppState>>,
+    description: String,
+) -> Result<Value, String> {
+    gate(&state)?;
+    let key = state.api_key().ok_or_else(|| {
+        "No Nebius API key configured. Add it in Security or setup to use LLM features.".to_string()
+    })?;
+    let result = crate::classify::synthesize_rule(&description, &key)
+        .await
+        .map_err(|e| e.to_string())?;
+    // Validate the regex before returning
+    let pattern = result.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
+    let rule_type = result.get("rule_type").and_then(|v| v.as_str()).unwrap_or("path");
+    if !pattern.is_empty() {
+        regex::Regex::new(pattern).map_err(|e| format!("LLM produced invalid regex '{}': {}", pattern, e))?;
+    }
+    if rule_type != "path" && rule_type != "cmd" {
+        return Err(format!("LLM produced invalid rule_type '{}': must be path or cmd", rule_type));
+    }
+    Ok(result)
+}
+
+/// Feature 3: Review a server's tools for security risks at registration time.
+#[tauri::command]
+pub async fn review_tools(
+    state: State<'_, Arc<AppState>>,
+    tools: Vec<Value>,
+) -> Result<Value, String> {
+    gate(&state)?;
+    let key = state.api_key().ok_or_else(|| {
+        "No Nebius API key configured. Add it in Security or setup to use LLM features.".to_string()
+    })?;
+    crate::classify::review_tools(&tools, &key)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Feature 4: Summarize the audit log.
+#[tauri::command]
+pub async fn summarize_audit(
+    state: State<'_, Arc<AppState>>,
+) -> Result<String, String> {
+    gate(&state)?;
+    let key = state.api_key().ok_or_else(|| {
+        "No Nebius API key configured. Add it in Security or setup to use LLM features.".to_string()
+    })?;
+    let entries = state.entries.lock().unwrap().iter().cloned().collect::<Vec<_>>();
+    crate::classify::summarize_audit(&entries, &key)
+        .await
+        .map_err(|e| e.to_string())
+}

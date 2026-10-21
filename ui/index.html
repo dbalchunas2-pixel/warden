@@ -252,9 +252,11 @@ header { border-bottom:1px solid var(--border); padding:16px 28px; display:flex;
         <option value="allowed">Allowed only</option>
       </select>
       <button class="export-btn" onclick="exportAudit()">Export CSV</button>
+      <button class="export-btn" onclick="summarizeAudit()" id="audit-summarize-btn">Summarize (AI)</button>
     </div>
+    <div id="audit-summary" style="display:none;margin-bottom:14px;padding:14px;background:var(--panel);border:1px solid var(--border);border-radius:6px;font-size:12px;line-height:1.6;color:var(--text)"></div>
     <table class="audit-table">
-      <thead><tr><th>Time</th><th>Method</th><th>Reason</th><th>Verdict</th><th>Layer</th></tr></thead>
+      <thead><tr><th>Time</th><th>Method</th><th>Reason</th><th>Verdict</th><th>Layer</th><th></th></tr></thead>
       <tbody id="audit-body"></tbody>
     </table>
   </div>
@@ -272,6 +274,14 @@ header { border-bottom:1px solid var(--border); padding:16px 28px; display:flex;
       </select>
       <input id="rule-pattern" placeholder="Regex pattern, e.g. .*\\.ssh/.*" onkeydown="if(event.key==='Enter')addRule()">
       <button onclick="addRule()">Add</button>
+    </div>
+    <div style="margin-top:16px;padding:14px;background:var(--panel);border:1px solid var(--border);border-radius:6px">
+      <div style="font-size:10px;color:var(--dim);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px">AI Rule Synthesis (Nemotron)</div>
+      <div style="display:flex;gap:10px;align-items:center">
+        <input id="nl-rule" placeholder="Describe a rule in English, e.g. block any path under .ssh" style="flex:1;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:10px 14px;border-radius:6px;font-family:var(--mono);font-size:12px" onkeydown="if(event.key==='Enter')synthesizeRule()">
+        <button class="export-btn" onclick="synthesizeRule()" id="synth-btn">Generate Rule</button>
+      </div>
+      <div id="synth-result" style="display:none;margin-top:10px;font-size:11px;color:var(--text);line-height:1.6"></div>
     </div>
     <div style="margin-top:14px;padding:12px;background:var(--panel);border:1px solid var(--border);border-radius:5px;font-size:11px;color:var(--dim);line-height:1.6">
       Rules added here take effect immediately for new tool calls. Startup rules come from <span style="color:var(--accent)">warden.toml</span>.
@@ -348,6 +358,11 @@ header { border-bottom:1px solid var(--border); padding:16px 28px; display:flex;
         <button class="export-btn" onclick="copySnippet()">Copy to Clipboard</button>
         <span id="copy-msg" style="font-size:10px;color:var(--accent)"></span>
       </div>
+      <div style="margin-top:12px">
+        <button class="export-btn" onclick="reviewServerTools()" id="review-btn">Review Tools (AI)</button>
+        <span id="review-msg" style="font-size:10px;color:var(--dim);margin-left:8px"></span>
+      </div>
+      <div id="review-result" style="display:none;margin-top:12px;padding:14px;background:var(--panel);border:1px solid var(--border);border-radius:6px;font-size:12px;line-height:1.6"></div>
     </div>
   </div>
 </div>
@@ -509,7 +524,10 @@ function renderAudit() {
   filtered.forEach(e => {
     const t = e.timestamp ? new Date(e.timestamp).toLocaleTimeString('en-US',{hour12:false}) : '--';
     const layer = (e.layer || ((e.reason||'').includes('rule')||((e.reason||'').includes('Rule')) ? 'rules' : 'llm')).toUpperCase();
-    html += '<tr><td>'+t+'</td><td>'+esc(e.method||'')+'</td><td style="color:var(--dim);max-width:400px;overflow:hidden;text-overflow:ellipsis">'+esc(e.reason||'')+'</td><td><span class="badge '+e.verdict+'">'+e.verdict+'</span></td><td style="color:var(--dim)">'+layer+'</td></tr>';
+    html += '<tr><td>'+t+'</td><td>'+esc(e.method||'')+'</td><td style="color:var(--dim);max-width:400px;overflow:hidden;text-overflow:ellipsis">'+esc(e.reason||'')+'</td><td><span class="badge '+e.verdict+'">'+e.verdict+'</span></td><td style="color:var(--dim)">'+layer+'</td>';
+    if (e.verdict === 'blocked') {
+      html += '<td><button class="export-btn" style="padding:3px 8px;font-size:9px" data-ts="'+e.timestamp+'" onclick="explainBlock(this.dataset.ts,event)">Why?</button></td></tr>';
+    } else { html += '<td></td></tr>'; }
   });
   document.getElementById('audit-body').innerHTML = html || '<tr><td colspan=5 style="text-align:center;color:var(--dim);padding:30px">No entries</td></tr>';
 }
@@ -822,6 +840,99 @@ async function loadDashboard() {
       : 'No NEBIUS_API_KEY found. Without it Warden still blocks with rules, but <span class="bad">no rule match = conservative block</span>. Get a free key at <b>studio.nebius.ai</b>.';
   }
 }
+
+// Feature 1: Explain-a-Block
+async function explainBlock(ts, ev) {
+  ev.stopPropagation();
+  const log = await invoke('get_audit_log');
+  const entry = log.find(e => (e.timestamp||'').toString() === ts);
+  if (!entry) return;
+  const row = ev.target.closest('tr');
+  let next = row.nextSibling;
+  if (next && next.classList && next.classList.contains('explain-row')) { next.remove(); return; }
+  const tr = document.createElement('tr'); tr.className = 'explain-row';
+  tr.innerHTML = '<td colspan="6" style="padding:12px;background:var(--panel2);border-top:1px solid var(--border);font-size:11px;color:var(--text);line-height:1.6">Analyzing with Nemotron...</td>';
+  row.parentNode.insertBefore(tr, row.nextSibling);
+  try {
+    const explanation = await invoke('explain_block', { entry: entry });
+    tr.innerHTML = '<td colspan="6" style="padding:12px;background:var(--panel2);border-top:1px solid var(--border);font-size:11px;color:var(--text);line-height:1.6">' + esc(explanation) + '</td>';
+  } catch(e) {
+    tr.innerHTML = '<td colspan="6" style="padding:12px;background:var(--panel2);font-size:11px;color:#ff6b6b">Error: ' + esc(e) + '</td>';
+  }
+}
+
+// Feature 2: NL Rule Synthesis
+async function synthesizeRule() {
+  const desc = document.getElementById('nl-rule').value.trim();
+  if (!desc) return;
+  const btn = document.getElementById('synth-btn');
+  const result = document.getElementById('synth-result');
+  btn.textContent = 'Generating...'; btn.disabled = true;
+  result.style.display = 'block'; result.textContent = 'Asking Nemotron...';
+  try {
+    const r = await invoke('synthesize_rule', { description: desc });
+    const rt = r.rule_type || 'path';
+    const pat = r.pattern || '';
+    const exp = r.explanation || '';
+    result.innerHTML = '<div style="color:var(--accent);margin-bottom:6px">Generated ' + esc(rt) + ' rule</div>' +
+      '<div style="color:var(--text);margin-bottom:4px"><code>' + esc(pat) + '</code></div>' +
+      '<div style="color:var(--dim);margin-bottom:10px">' + esc(exp) + '</div>' +
+      '<button class="export-btn" onclick=\'installSynthesizedRule("' + esc(rt) + '","' + esc(pat).replace(/"/g,'&quot;') + '")\'>Install Rule</button>';
+  } catch(e) {
+    result.innerHTML = '<span style="color:#ff6b6b">Error: ' + esc(e) + '</span>';
+  }
+  btn.textContent = 'Generate Rule'; btn.disabled = false;
+}
+
+function installSynthesizedRule(rt, pat) {
+  document.getElementById('rule-type').value = rt;
+  document.getElementById('rule-pattern').value = pat;
+  addRule();
+  document.getElementById('synth-result').style.display = 'none';
+  document.getElementById('nl-rule').value = '';
+}
+
+// Feature 3: Tool Risk Review
+async function reviewServerTools() {
+  const btn = document.getElementById('review-btn');
+  const msg = document.getElementById('review-msg');
+  const result = document.getElementById('review-result');
+  btn.textContent = 'Reviewing...'; btn.disabled = true;
+  msg.textContent = ''; result.style.display = 'block'; result.textContent = 'Analyzing tool schemas with Nemotron...';
+  try {
+    const servers = await invoke('list_servers');
+    const r = await invoke('review_tools', { tools: servers });
+    let html = '<div style="margin-bottom:10px"><b>Risk Level: ' + esc(r.risk_level || '?') + '</b></div>';
+    html += '<div style="color:var(--dim);margin-bottom:12px">' + esc(r.summary || '') + '</div>';
+    if (r.tools) {
+      html += '<table class="audit-table"><thead><tr><th>Tool</th><th>Risk</th><th>Concern</th><th>Suggested Rule</th></tr></thead><tbody>';
+      r.tools.forEach(function(t) {
+        html += '<tr><td>' + esc(t.name||'') + '</td><td>' + esc(t.risk||'') + '</td><td>' + esc(t.concern||'') + '</td><td>' + (t.suggested_rule ? '<code>'+esc(t.suggested_rule)+'</code>' : '') + '</td></tr>';
+      });
+      html += '</tbody></table>';
+    }
+    result.innerHTML = html;
+  } catch(e) {
+    result.innerHTML = '<span style="color:#ff6b6b">Error: ' + esc(e) + '</span>';
+  }
+  btn.textContent = 'Review Tools (AI)'; btn.disabled = false;
+}
+
+// Feature 4: Audit Summary
+async function summarizeAudit() {
+  const btn = document.getElementById('audit-summarize-btn');
+  const box = document.getElementById('audit-summary');
+  btn.textContent = 'Summarizing...'; btn.disabled = true;
+  box.style.display = 'block'; box.textContent = 'Analyzing audit log with Nemotron...';
+  try {
+    const summary = await invoke('summarize_audit');
+    box.textContent = summary;
+  } catch(e) {
+    box.textContent = 'Error: ' + e;
+  }
+  btn.textContent = 'Summarize (AI)'; btn.disabled = false;
+}
+
 </script>
 </body>
 </html>

@@ -157,3 +157,148 @@ mod tests {
         assert!(result.contains("block"));
     }
 }
+// ─── Reusable Nemotron caller ─────────────────────────────────────────────
+/// Generic chat completion call to Nebius Token Factory.
+/// Returns the raw text content from the model.
+pub async fn call_nemotron(system_prompt: &str, user_msg: &str, api_key: &str) -> Result<String> {
+    let payload = serde_json::json!({
+        "model": NEBIUS_MODEL,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_msg}
+        ],
+        "temperature": 0.0,
+        "seed": 42,
+        "max_tokens": 4096,
+    });
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .build()
+        .context("Failed to build HTTP client")?;
+    let resp = client
+        .post(format!("{}chat/completions", NEBIUS_BASE_URL))
+        .bearer_auth(api_key)
+        .json(&payload)
+        .send()
+        .await
+        .context("Failed to send request to Nebius Token Factory")?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!("Nebius API error {}: {}", status, body);
+    }
+    let resp_json: Value = resp.json().await.context("Failed to parse Nebius response")?;
+    let content = resp_json
+        .get("choices")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("message"))
+        .and_then(|m| m.get("content"))
+        .and_then(|c| c.as_str())
+        .context("No content in Nebius response")?;
+    Ok(content.to_string())
+}
+
+// ─── Feature 1: Explain-a-Block ────────────────────────────────────────────
+/// Given a blocked tool call, produce a human-readable explanation of why it was blocked.
+pub async fn explain_block(method: &str, params: &Value, reason: &str, verdict: &str, api_key: &str) -> Result<String> {
+    let args_str = {
+        let mut s = serde_json::to_string(params).unwrap_or_default();
+        if s.len() > 4 * 1024 { s.truncate(4 * 1024); s.push_str("...[truncated]"); }
+        s
+    };
+    let system = "You are Warden, a security analyst for MCP (Model Context Protocol) tool calls. \
+A tool call was blocked by Warden's security pipeline. Explain to a human operator WHY this specific call was blocked, \
+what the potential risk was, and what a safe alternative might look like. Keep it to 2-4 sentences. No markdown.";
+    let user = format!(
+        "Blocked tool call:\n  Method: {}\n  Arguments: {}\n  Verdict: {}\n  Block reason: {}\n\nExplain why this was blocked:",
+        method, args_str, verdict, reason
+    );
+    call_nemotron(system, &user, api_key).await
+}
+
+// ─── Feature 2: Natural-language Rule Synthesis ────────────────────────────
+pub async fn synthesize_rule(description: &str, api_key: &str) -> Result<Value> {
+    let system = r#"You are Warden, a security rule engine for MCP (Model Context Protocol) tool calls.
+
+The operator describes a security policy in plain English. You convert it into a deterministic regex rule that Warden can enforce locally without any LLM call.
+
+Warden matches rules against string values inside the tool call's JSON arguments. There are two rule types:
+- "path": matched against file paths and URLs found in arguments
+- "cmd": matched against shell commands and tool names found in arguments
+
+Respond ONLY with a JSON object, no markdown:
+{"rule_type": "path" | "cmd", "pattern": "<rust regex>", "explanation": "<one sentence what this catches>"}
+
+Guidelines:
+- Use Rust regex syntax (https://docs.rs/regex)
+- Be precise: a good pattern catches the threat without false-positiveing safe calls
+- For paths, match against absolute paths like /Users/foo/.ssh/id_rsa or /etc/passwd
+- For commands, match against the command string itself like rm -rf or curl http://
+- Anchor with .* for flexibility, e.g. .*/\.ssh/.* matches any path under .ssh
+- If the description is ambiguous, make a reasonable best-effort pattern
+"#;
+    let user = format!(
+        "Convert this security policy into a Warden regex rule:\n\n\"{}\"\n\nRespond with JSON only.",
+        description
+    );
+    let content = call_nemotron(system, &user, api_key).await?;
+    let json_str = extract_json(&content);
+    let parsed: Value = serde_json::from_str(&json_str)
+        .with_context(|| format!("Failed to parse synthesized rule from: {}", content))?;
+    Ok(parsed)
+}
+
+// ─── Feature 3: Tool Risk Review ──────────────────────────────────────────
+pub async fn review_tools(tools: &[Value], api_key: &str) -> Result<Value> {
+    let tools_str = {
+        let mut s = serde_json::to_string_pretty(tools).unwrap_or_default();
+        if s.len() > 8 * 1024 { s.truncate(8 * 1024); s.push_str("...[truncated]"); }
+        s
+    };
+    let system = r#"You are Warden, a security reviewer for MCP (Model Context Protocol) servers.
+
+The operator is adding a new MCP server. You are given the server's tool list (names, descriptions, input schemas).
+Review each tool for security risk and flag any that could be dangerous.
+
+Respond ONLY with a JSON object, no markdown:
+{
+  "risk_level": "low" | "medium" | "high",
+  "summary": "<one paragraph overall assessment>",
+  "tools": [
+    {"name": "<tool name>", "risk": "low" | "medium" | "high", "concern": "<what could go wrong, or empty if safe>", "suggested_rule": "<optional regex pattern to add, or empty>"}
+  ]
+}
+"#;
+    let user = format!(
+        "Review this MCP server's tools for security risks:\n\n{}\n\nAssess each tool and respond with JSON only.",
+        tools_str
+    );
+    let content = call_nemotron(system, &user, api_key).await?;
+    let json_str = extract_json(&content);
+    let parsed: Value = serde_json::from_str(&json_str)
+        .with_context(|| format!("Failed to parse tool review from: {}", content))?;
+    Ok(parsed)
+}
+
+// ─── Feature 4: Audit Log Summary ──────────────────────────────────────────
+pub async fn summarize_audit(entries: &[Value], api_key: &str) -> Result<String> {
+    let log_str = {
+        let mut s = String::new();
+        for (i, e) in entries.iter().enumerate().take(200) {
+            let method = e.get("method").and_then(|v| v.as_str()).unwrap_or("?");
+            let verdict = e.get("verdict").and_then(|v| v.as_str()).unwrap_or("?");
+            let reason = e.get("reason").and_then(|v| v.as_str()).unwrap_or("");
+            let ts = e.get("ts").and_then(|v| v.as_str()).unwrap_or("");
+            s.push_str(&format!("{}. [{}] {} - {} - {}\n", i + 1, ts, method, verdict, reason));
+        }
+        if s.is_empty() { s = "(no audit entries)".into(); }
+        if s.len() > 8 * 1024 { s.truncate(8 * 1024); s.push_str("...[truncated]"); }
+        s
+    };
+    let system = "You are Warden, a security analyst. Summarize the audit log of MCP tool calls \
+for the operator. Highlight: total calls, block rate, most common threats blocked, \
+any patterns of concern, and overall security posture. Keep it to one paragraph. No markdown.";
+    let user = format!("Summarize this audit log:\n\n{}", log_str);
+    call_nemotron(system, &user, api_key).await
+}
