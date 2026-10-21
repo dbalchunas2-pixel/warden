@@ -235,6 +235,19 @@ header { border-bottom:1px solid var(--border); padding:16px 28px; display:flex;
   </div>
 </div>
 
+  <div class="panel" style="margin:16px 22px;max-width:820px;padding:16px">
+    <div class="section-title">Security</div>
+    <div style="display:flex;gap:10px;align-items:center;margin-bottom:10px">
+      <input id="sec-pw" type="password" placeholder="New master password (min 8 chars)" style="flex:1">
+      <button class="export-btn" onclick="setPw()">Set / Update Password</button>
+    </div>
+    <div style="display:flex;gap:10px;align-items:center">
+      <button class="export-btn" onclick="linkGithub(&#39;sec-oauth&#39;)">Link GitHub Identity</button>
+      <span id="sec-oauth" style="font-size:10px;color:var(--dim)"></span>
+      <span id="sec-msg" style="font-size:10px;color:var(--accent)"></span>
+    </div>
+  </div>
+
 <!-- Audit Log -->
 <div class="view" id="view-audit">
   <div style="padding:18px 22px">
@@ -595,6 +608,7 @@ async function saveSetup() {
 }
 
 let oauthPollTimer = null;
+let invoke; // set by init() from Tauri global - shared by all top-level helpers
 
 async function doUnlock() {
   const err = document.getElementById('lock-err');
@@ -617,7 +631,7 @@ async function renderServers() {
     const servers = await invoke('list_servers');
     let html = '';
     servers.forEach((s) => {
-      html += '<div class="rule-item"><span class="rule-type path">mcp</span><span class="rule-pattern"><b>' + esc(s.name) + '</b> <span style="color:var(--dim)">' + esc(s.command) + '</span></span><button class="rule-toggle" onclick="showSnippet('' + s.name + '')">Config</button><button class="rule-del" onclick="removeServer('' + s.name + '')">&times;</button></div>';
+      html += '<div class="rule-item"><span class="rule-type path">mcp</span><span class="rule-pattern"><b>' + esc(s.name) + '</b> <span style="color:var(--dim)">' + esc(s.command) + '</span></span><button class="rule-toggle" data-name="' + s.name + '" onclick="showSnippet(this.dataset.name)">Config</button><button class="rule-del" data-name="' + s.name + '" onclick="removeServer(this.dataset.name)">&times;</button></div>';
     });
     document.getElementById('server-list').innerHTML = html || '<div style="color:var(--dim);padding:14px">No servers registered yet</div>';
   } catch(e) { console.error(e); }
@@ -664,8 +678,8 @@ function fallbackCopy(t, done) {
   document.body.removeChild(ta);
 }
 
-async function linkGithub() {
-  const status = document.getElementById('setup-oauth-status');
+async function linkGithub(targetId) {
+  const status = document.getElementById(targetId || 'setup-oauth-status');
   try {
     const dc = await invoke('oauth_start');
     status.innerHTML = 'Enter code <b style="color:var(--accent)">' + esc(dc.user_code) + '</b> at ' + esc(dc.verification_uri) + ' (browser opened)...';
@@ -685,12 +699,23 @@ async function linkGithub() {
   } catch(e) { status.textContent = String(e); }
 }
 
+async function setPw() {
+  const msg = document.getElementById('sec-msg');
+  const pw = document.getElementById('sec-pw').value;
+  try {
+    await invoke('set_master_password', { password: pw });
+    msg.textContent = 'Master password saved (Keychain).';
+    document.getElementById('sec-pw').value = '';
+    window.authState = await invoke('auth_status');
+  } catch(e) { msg.textContent = String(e); msg.style.color = 'var(--danger)'; }
+}
+
 function esc(s) { const d=document.createElement('div'); d.textContent=s; return d.innerHTML; }
 
 (async function init() {
   const tauri = window.__TAURI__;
   if (!tauri) { document.getElementById('status-text').textContent = 'Tauri API missing'; return; }
-  const invoke = tauri.core.invoke;
+  invoke = tauri.core.invoke;
   const listen = tauri.event.listen;
 
   listen('tool-call-event', (e) => ingestEntry(e.payload));
