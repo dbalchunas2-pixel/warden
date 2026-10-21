@@ -183,6 +183,7 @@ header { border-bottom:1px solid var(--border); padding:16px 28px; display:flex;
   <div class="nav">
     <button class="nav-btn active" data-view="overview" onclick="showView('overview', this)">Overview</button>
     <button class="nav-btn" data-view="servers" onclick="showView('servers', this)">Servers</button>
+    <button class="nav-btn" data-view="security" onclick="showView('security', this)">Security</button>
     <button class="nav-btn" data-view="audit" onclick="showView('audit', this)">Audit Log</button>
     <button class="nav-btn" data-view="rules" onclick="showView('rules', this)">Rules</button>
     <button class="nav-btn" data-view="tester" onclick="showView('tester', this)">Tester</button>
@@ -235,18 +236,7 @@ header { border-bottom:1px solid var(--border); padding:16px 28px; display:flex;
   </div>
 </div>
 
-  <div class="panel" style="margin:16px 22px;max-width:820px;padding:16px">
-    <div class="section-title">Security</div>
-    <div style="display:flex;gap:10px;align-items:center;margin-bottom:10px">
-      <input id="sec-pw" type="password" placeholder="New master password (min 8 chars)" style="flex:1">
-      <button class="export-btn" onclick="setPw()">Set / Update Password</button>
-    </div>
-    <div style="display:flex;gap:10px;align-items:center">
-      <button class="export-btn" onclick="linkGithub(&#39;sec-oauth&#39;)">Link GitHub Identity</button>
-      <span id="sec-oauth" style="font-size:10px;color:var(--dim)"></span>
-      <span id="sec-msg" style="font-size:10px;color:var(--accent)"></span>
-    </div>
-  </div>
+  
 
 <!-- Audit Log -->
 <div class="view" id="view-audit">
@@ -317,6 +307,24 @@ header { border-bottom:1px solid var(--border); padding:16px 28px; display:flex;
       <p id="test-reason"></p>
       <div class="tester-meta" id="test-meta"></div>
     </div>
+  </div>
+</div>
+
+<div class="view" id="view-security">
+  <div style="padding:18px 22px;max-width:820px">
+    <div class="section-title">Security</div>
+    <p id="sec-status" style="color:var(--dim);font-size:11px;margin-bottom:16px;line-height:1.6">Loading security state...</p>
+    <div style="display:flex;gap:10px;align-items:center;margin-bottom:10px">
+      <input id="sec-pw" type="password" placeholder="New master password (min 8 chars)" style="flex:1">
+      <button class="export-btn" onclick="setPw()">Set / Update Password</button>
+    </div>
+    <p style="color:var(--dim);font-size:11px;margin-bottom:8px">Linked identity: <span id="sec-identity" style="color:var(--text)">none</span></p>
+    <div style="display:flex;gap:10px;align-items:center">
+      <button class="export-btn" onclick="linkGithub(&#39;sec-oauth&#39;)">Link GitHub Identity</button>
+      <span id="sec-oauth" style="font-size:10px;color:var(--dim)"></span>
+      <span id="sec-msg" style="font-size:10px;color:var(--accent)"></span>
+    </div>
+  </div>
   </div>
 </div>
 
@@ -602,6 +610,7 @@ async function saveSetup() {
     await invoke('start_proxy');
     document.getElementById('setup-overlay').classList.remove('show');
     window.authState = await invoke('auth_status');
+    updateSecurityPanel(window.authState);
     document.getElementById('lock-btn').style.display = '';
     applyStatus();
   } catch(e) { err.textContent = String(e); }
@@ -707,6 +716,7 @@ async function setPw() {
     msg.textContent = 'Master password saved (Keychain).';
     document.getElementById('sec-pw').value = '';
     window.authState = await invoke('auth_status');
+    updateSecurityPanel(window.authState);
   } catch(e) { msg.textContent = String(e); msg.style.color = 'var(--danger)'; }
 }
 
@@ -732,6 +742,7 @@ function esc(s) { const d=document.createElement('div'); d.textContent=s; return
   const auth = await invoke('auth_status');
   window.authState = auth;
   if (auth.identity) document.getElementById('info-identity').textContent = '@' + auth.identity;
+  updateSecurityPanel(auth);
   if (auth.has_password && !auth.unlocked) {
     document.getElementById('lock-btn').style.display = '';
     document.getElementById('lock-overlay').classList.add('show');
@@ -739,6 +750,13 @@ function esc(s) { const d=document.createElement('div'); d.textContent=s; return
   }
   await loadDashboard();
 })();
+
+function updateSecurityPanel(auth) {
+  const st = document.getElementById('sec-status');
+  const id = document.getElementById('sec-identity');
+  if (st) st.textContent = (auth.has_password ? 'Master password is set (Keychain-backed, Argon2id).' : 'No master password set - the dashboard is not locked.') + ' Lock anytime with the Lock button in the nav bar.';
+  if (id) id.textContent = auth.identity ? '@' + auth.identity : 'none';
+}
 
 async function loadDashboard() {
   document.getElementById('lock-btn').style.display = (window.authState && window.authState.has_password) ? '' : 'none';
