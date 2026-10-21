@@ -167,6 +167,25 @@ cargo build --release                      # binary at target/release/warden
 npx @tauri-apps/cli@2 build                # Warden.app + dmg installer
 ```
 
+## Adversarial Evaluation
+
+Warden ships with a reproducible adversarial evaluation harness (`eval/attack_harness.cjs`, zero dependencies):
+
+```sh
+node eval/attack_harness.cjs --seed 1337          # full tiered suite
+node eval/attack_harness.cjs --seed 42 --flood 30 # DoS / budget-exhaustion test
+```
+
+It fires randomized attacks across five difficulty tiers (loud rule-level, explicit, obfuscated, indirect/multi-step, evasion-grade) plus benign controls, grades every verdict against ground truth, and writes a markdown + JSON report to `eval/results/`.
+
+Latest results (seed 1337, 22 attacks + 6 benign controls):
+
+- Attack detection rate: **100%**
+- False-positive rate on benign traffic: **0%**
+- Avg latency per verdict: **~3.5s** (rule-level decisions in <10ms)
+
+Flood test (30 back-to-back attacks, tight LLM budget): **30/30 blocked**, with only 3 calls consuming LLM budget — the rest stopped by the rate limiter (fail-closed) or the rule engine. The classifier request itself is hard-capped at a 20s timeout; any failure fails closed.
+
 ## License
 
 Apache-2.0

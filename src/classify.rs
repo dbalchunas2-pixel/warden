@@ -58,7 +58,13 @@ pub async fn classify_tool_call(method: &str, params: &Value, api_key: &str) -> 
         "max_tokens": 4096,
     });
 
-    let client = Client::new();
+    // Hard timeout: a hung LLM request must never stall the proxy.
+    // The caller treats any error here as a conservative block (fail closed).
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .build()
+        .context("Failed to build HTTP client")?;
     let resp = client
         .post(format!("{}chat/completions", NEBIUS_BASE_URL))
         .bearer_auth(&api_key)

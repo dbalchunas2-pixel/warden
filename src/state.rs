@@ -194,6 +194,35 @@ impl AppState {
     }
 }
 
+/// Token bucket guarding the LLM classification budget.
+/// Under flood, we stop calling the LLM entirely and fail closed.
+struct TokenBucket {
+    tokens: f64,
+    burst: f64,
+    refill_per_sec: f64,
+    last: std::time::Instant,
+}
+
+impl TokenBucket {
+    fn new() -> Self {
+        let burst = std::env::var("WARDEN_LLM_BURST").ok().and_then(|v| v.parse().ok()).unwrap_or(10.0);
+        let refill = std::env::var("WARDEN_LLM_REFILL").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
+        Self { tokens: burst, burst, refill_per_sec: refill, last: std::time::Instant::now() }
+    }
+
+    fn try_acquire(&mut self) -> bool {
+        let now = std::time::Instant::now();
+        self.tokens = (self.tokens + now.duration_since(self.last).as_secs_f64() * self.refill_per_sec).min(self.burst);
+        self.last = now;
+        if self.tokens >= 1.0 {
+            self.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+}
+
 async fn proxy_loop(state: Arc<AppState>, upstream_cmd: String) -> Result<()> {
     let parts: Vec<&str> = upstream_cmd.split_whitespace().collect();
     if parts.is_empty() {
@@ -212,6 +241,7 @@ async fn proxy_loop(state: Arc<AppState>, upstream_cmd: String) -> Result<()> {
     let mut child_stdout = BufReader::new(child.stdout.take().expect("child stdout"));
     let mut stdin = BufReader::new(tokio::io::stdin());
     let mut stdout = tokio::io::stdout();
+    let mut llm_limiter = TokenBucket::new();
 
     info!("Warden proxy running. Tool calls are being inspected.");
 
@@ -273,6 +303,15 @@ async fn proxy_loop(state: Arc<AppState>, upstream_cmd: String) -> Result<()> {
                             continue;
                         }
                         Some(key) => {
+                            if !llm_limiter.try_acquire() {
+                                let reason = "Rate limit exceeded: LLM classification budget exhausted. Blocked fail-closed without calling the LLM.";
+                                warn!("BLOCK: {} - {}", method, reason);
+                                let err = jsonrpc_error(&request, reason);
+                                stdout.write_all(err.as_bytes()).await?;
+                                stdout.flush().await?;
+                                state.push_event(&method, &params, "blocked", reason, "rate-limit");
+                                continue;
+                            }
                             info!("No rule match: {} -> LLM classification", method);
                             match crate::classify::classify_tool_call(&method, &params, &key).await {
                                 Ok(c) => {
