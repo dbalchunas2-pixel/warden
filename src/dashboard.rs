@@ -56,9 +56,15 @@ pub fn start(state: Arc<DashboardState>, port: u16) {
     tracing::info!("Dashboard running at http://{}", addr);
 
     tokio::spawn(async move {
-        let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-        if let Err(e) = axum::serve(listener, app).await {
-            tracing::error!("Dashboard server error: {}", e);
+        match tokio::net::TcpListener::bind(addr).await {
+            Ok(listener) => {
+                if let Err(e) = axum::serve(listener, app).await {
+                    tracing::error!("Dashboard server error: {}", e);
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Dashboard port {} in use, skipping: {}", port, e);
+            }
         }
     });
 }

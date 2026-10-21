@@ -4,6 +4,16 @@
 
 Warden is a security proxy that sits between an AI agent and its MCP (Model Context Protocol) tools. It intercepts every tool call and runs it through a layered defense pipeline before allowing execution.
 
+## One-Command Install
+
+```bash
+cargo install --git https://github.com/dbalchunas2-pixel/warden
+export NEBIUS_API_KEY="your-key"
+warden demo
+```
+
+That's it. The demo runs 5 attack scenarios through Warden with a built-in mock MCP server and opens a live dashboard.
+
 ## How It Works
 
 ```
@@ -28,41 +38,72 @@ AI Agent (MCP Client)
 
 ## Why Layered Defense?
 
-Using an LLM as the sole security gate is vulnerable to prompt injection - the same attack that tricks the agent can trick the classifier. Warden uses a deterministic rule engine as the first layer (unbypassable) and the LLM as a second layer for nuanced classification. This layered approach means:
+Using an LLM as the sole security gate is vulnerable to prompt injection - the same attack that tricks the agent can trick the classifier. Warden uses a deterministic rule engine as the first layer (unbypassable) and the LLM as a second layer for nuanced classification.
 
 - Known-bad patterns are blocked instantly by rules, no LLM needed
 - Novel attacks are caught by the LLM's contextual understanding
 - Even if the LLM is tricked, the rules still catch obvious attacks
 
-## Quick Start
+## Usage
 
+### Demo Mode
 ```bash
-# Set your Nebius API key
-export NEBIUS_API_KEY="your-key-here"
+warden demo
+```
+Runs 5 attack scenarios with a built-in mock MCP server. Opens a live dashboard at http://127.0.0.1:31337.
 
-# Build
-cargo build --release
+### Proxy Mode
+```bash
+# With CLI args
+warden --upstream "node /path/to/mcp-server.js"
 
-# Run with a real MCP server
-./target/release/warden --config config/default.toml --upstream "node /path/to/mcp-server.js"
+# With a config file
+warden --config my-config.toml --upstream "node server.js"
 
-# Or test without a real server
-./target/release/warden --config config/default.toml --upstream "cat"
+# Custom dashboard port
+warden --upstream "node server.js" --port 8080
 ```
 
-## Configuration
+### Config File (optional)
+All config is built into the binary. To customize, create a TOML file:
 
-See `config/default.toml` for all options. Key sections:
+```toml
+upstream_command = "node /path/to/server.js"
 
-- `upstream_command`: The MCP server command to proxy to
-- `[nebius]`: Nebius Token Factory settings (model, API key, confidence threshold)
-- `[rules]`: Deterministic rule engine (tool names, path patterns, command patterns)
-- `[audit]`: Audit log path (JSONL format)
+[nebius]
+model = "nvidia/Nemotron-3_5-Lightning"
+confidence_threshold = 0.7
+
+[rules]
+block_tools = []
+allow_tools = ["tools/list", "initialize"]
+path_block_patterns = ["/etc/.*", "~/.ssh/.*", ".*\.env$"]
+cmd_block_patterns = ["rm .*-rf .*/", "curl.*\|.*sh", "dd of="]
+
+[audit]
+log_path = "./warden-audit.jsonl"
+```
+
+## Dashboard
+
+When running, Warden serves a live monitoring dashboard at http://127.0.0.1:31337 showing:
+- Real-time tool call feed (allowed/blocked with colors)
+- Stats: total calls, allowed, blocked, block rate
+- Threat category breakdown
+- Active rule patterns
+
+## Demo Scenarios
+
+1. **Credential Access** - Agent reads `~/.ssh/id_rsa` -> BLOCKED by Nemotron LLM (credential_access)
+2. **Destructive Command** - Agent runs `dd of=/dev/sda` -> BLOCKED by rule engine (instant)
+3. **Safe File Read** - Agent reads project source -> ALLOWED by Nemotron LLM (safe)
+4. **Data Exfiltration** - Agent pipes auth logs through base64+curl -> BLOCKED by Nemotron LLM (data_exfiltration)
+5. **Prompt Injection** - Agent writes file with embedded `curl|bash` -> BLOCKED by rule engine (instant)
 
 ## Built For
 
 - **Nebius x NVIDIA Global AI Hackathon** - Coding & Agentic Engineering track
-- Uses NVIDIA Nemotron-3.5 Lightning model on Nebius Token Factory
+- Uses NVIDIA Nemotron-3.5-Lightning on Nebius Token Factory
 - OpenAI-compatible API, open-source models, open infrastructure
 
 ## Tech Stack
@@ -71,15 +112,6 @@ See `config/default.toml` for all options. Key sections:
 - Model Context Protocol (MCP) JSON-RPC 2.0 over stdio
 - Nebius Token Factory API (NVIDIA Nemotron models)
 - Deterministic rule engine (regex patterns)
+- Embedded web dashboard (axum)
 - Append-only audit log (JSONL)
-
-## Architecture Decisions
-
-### Why not LLM-only security?
-LLM-only security gates are vulnerable to prompt injection. An attacker can craft tool call arguments that contain instructions to the classifier itself. Warden's rule engine provides a deterministic first layer that cannot be bypassed by prompt injection.
-
-### Why not rules-only security?
-Rules can't catch novel attacks or understand context. A tool call that reads `passwords.txt` from a non-standard path, or chains `curl` with `base64` in a novel way, would slip past static patterns. The LLM layer catches what rules can't.
-
-### Why conservative blocking?
-When the LLM classifier returns confidence below the threshold (default 0.7), Warden blocks the call. In security, false negatives (allowing an attack) are worse than false positives (blocking a safe call). The audit log records every decision for review.
+- Zero external config files - everything compiled into the binary
