@@ -221,13 +221,9 @@ header { border-bottom:1px solid var(--border); padding:16px 28px; display:flex;
   <div style="padding:18px 22px;max-width:700px">
     <div class="section-title">Active Rule Patterns</div>
     <div class="rule-list" id="rule-list"></div>
-    <div class="rule-add">
-      <select id="rule-type-add">
-        <option value="path">Path</option>
-        <option value="cmd">Command</option>
-      </select>
-      <input type="text" id="rule-pattern-add" placeholder="regex pattern...">
-      <button onclick="addRule()">Add</button>
+    <div style="margin-top:14px;padding:12px;background:var(--panel);border:1px solid var(--border);border-radius:5px;font-size:11px;color:var(--dim);line-height:1.6">
+      To add rules, edit <span style="color:var(--accent)">warden.toml</span> and restart Warden.<br>
+      Rules are loaded at startup from the config file.
     </div>
   </div>
 </div>
@@ -236,16 +232,18 @@ header { border-bottom:1px solid var(--border); padding:16px 28px; display:flex;
 <div class="view" id="view-tester">
   <div class="tester">
     <div class="section-title">Tool Call Tester</div>
-    <p style="color:var(--dim);font-size:11px;margin-bottom:20px">Manually test a tool call through Warden's security pipeline.</p>
+    <p style="color:var(--dim);font-size:11px;margin-bottom:20px">Run a test scenario through Warden's full security pipeline (rules + LLM classification).</p>
     <div class="tester-field">
-      <div class="tester-label">Tool Name</div>
-      <input type="text" id="test-method" placeholder="tools/call" value="tools/call">
+      <div class="tester-label">Test Scenario</div>
+      <select id="test-scenario" style="width:100%;background:var(--panel);border:1px solid var(--border);color:var(--text);padding:10px 14px;border-radius:6px;font-family:var(--mono);font-size:12px;">
+        <option value="0">1. Credential Access - read ~/.ssh/id_rsa</option>
+        <option value="1">2. Destructive Command - dd of=/dev/sda</option>
+        <option value="2">3. Safe File Read - project source</option>
+        <option value="3">4. Data Exfiltration - base64 + curl</option>
+        <option value="4">5. Prompt Injection - embedded curl|bash</option>
+      </select>
     </div>
-    <div class="tester-field">
-      <div class="tester-label">Arguments (JSON)</div>
-      <textarea id="test-params" placeholder='{"name":"shell.execute","arguments":{"command":"ls -la"}}'>{"name":"filesystem.read","arguments":{"path":"/etc/passwd"}}</textarea>
-    </div>
-    <button onclick="runTest()">Test Call</button>
+    <button onclick="runTest()">Run Through Pipeline</button>
     <div class="tester-result" id="test-result">
       <h3 id="test-verdict"></h3>
       <p id="test-reason"></p>
@@ -367,25 +365,16 @@ function renderRules() {
   }).catch(()=>{});
 }
 
-function addRule() {
-  const type = document.getElementById('rule-type-add').value;
-  const pattern = document.getElementById('rule-pattern-add').value;
-  if (!pattern) return;
-  fetch('/api/rules', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({type,pattern})}).then(()=>renderRules());
-  document.getElementById('rule-pattern-add').value = '';
-}
-
 function delRule(idx) {
   fetch('/api/rules/'+idx, {method:'DELETE'}).then(()=>renderRules());
 }
 
 function runTest() {
-  const method = document.getElementById('test-method').value;
-  const params = document.getElementById('test-params').value;
+  const idx = document.getElementById('test-scenario').value;
   const result = document.getElementById('test-result');
   result.className = 'tester-result';
   result.classList.remove('show');
-  fetch('/api/test', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({method,params})})
+  fetch('/api/test/'+idx)
     .then(r => r.json())
     .then(r => {
       result.classList.add('show', r.verdict);

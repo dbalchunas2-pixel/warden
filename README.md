@@ -1,117 +1,154 @@
 # Warden
 
-**MCP Security Gateway with LLM-Powered Tool Call Classification**
+MCP Security Gateway - LLM-powered tool call classification on Nebius Token Factory with NVIDIA Nemotron.
 
-Warden is a security proxy that sits between an AI agent and its MCP (Model Context Protocol) tools. It intercepts every tool call and runs it through a layered defense pipeline before allowing execution.
+Warden sits between your MCP client (Claude Desktop, Cursor, etc.) and your MCP server, intercepting every `tools/call` through a layered defense pipeline:
 
-## One-Command Install
+1. **Deterministic rules** - regex patterns for known attack vectors (credential paths, destructive commands, data exfiltration). Instant, zero latency.
+2. **LLM classification** - NVIDIA Nemotron on Nebius Token Factory analyzes ambiguous calls the rules don't cover.
+3. **Audit logging** - every decision recorded to JSONL with timestamp, method, params, verdict, and reason.
+
+## Install
 
 ```bash
 cargo install --git https://github.com/dbalchunas2-pixel/warden
-export NEBIUS_API_KEY="your-key"
-warden demo
 ```
 
-That's it. The demo runs 5 attack scenarios through Warden with a built-in mock MCP server and opens a live dashboard.
+## Quick Start
 
-## How It Works
-
-```
-AI Agent (MCP Client)
-    |
-    v
-  Warden (proxy + security pipeline)
-    |
-    +---> Layer 1: Rule Engine (deterministic, instant)
-    |     - Tool name allow/deny lists
-    |     - Path pattern matching (blocks /etc/*, ~/.ssh/*, .env, etc.)
-    |     - Command pattern matching (blocks rm -rf /, curl|sh, etc.)
-    |
-    +---> Layer 2: LLM Classification (NVIDIA Nemotron on Nebius)
-    |     - Analyzes ambiguous calls the rules don't cover
-    |     - Classifies as safe/unsafe with confidence score
-    |     - Conservative: blocks if confidence < threshold
-    |
-    v
-  Upstream MCP Server (actual tool execution)
-```
-
-## Why Layered Defense?
-
-Using an LLM as the sole security gate is vulnerable to prompt injection - the same attack that tricks the agent can trick the classifier. Warden uses a deterministic rule engine as the first layer (unbypassable) and the LLM as a second layer for nuanced classification.
-
-- Known-bad patterns are blocked instantly by rules, no LLM needed
-- Novel attacks are caught by the LLM's contextual understanding
-- Even if the LLM is tricked, the rules still catch obvious attacks
-
-## Usage
-
-### Demo Mode
 ```bash
-warden demo
-```
-Runs 5 attack scenarios with a built-in mock MCP server. Opens a live dashboard at http://127.0.0.1:31337.
+# First run - guided setup (generates warden.toml, checks API key)
+warden
 
-### Proxy Mode
-```bash
-# With CLI args
+# Start protecting an MCP server
 warden --upstream "node /path/to/mcp-server.js"
 
-# With a config file
-warden --config my-config.toml --upstream "node server.js"
-
-# Custom dashboard port
-warden --upstream "node server.js" --port 8080
+# Or use a config file
+warden --config warden.toml
 ```
 
-### Config File (optional)
-All config is built into the binary. To customize, create a TOML file:
+## Nebius API Key
+
+Warden uses NVIDIA Nemotron models on Nebius Token Factory for LLM classification.
+
+```bash
+# Get a free key at https://studio.nebius.ai
+export NEBIUS_API_KEY="your-key"
+
+# Persist it
+echo 'export NEBIUS_API_KEY="your-key"' >> ~/.zshrc
+source ~/.zshrc
+```
+
+Without the API key, the rule engine still blocks known attacks. LLM classification is only used for calls that don't match any rule.
+
+## MCP Client Configuration
+
+Point your MCP client at Warden instead of the real server:
+
+```json
+{
+  "mcpServers": {
+    "my-server": {
+      "command": "warden",
+      "args": ["--upstream", "node /path/to/mcp-server.js"]
+    }
+  }
+}
+```
+
+Or with a config file:
+
+```json
+{
+  "mcpServers": {
+    "my-server": {
+      "command": "warden",
+      "args": ["--config", "/path/to/warden.toml"]
+    }
+  }
+}
+```
+
+## Dashboard
+
+Warden runs a live dashboard at `http://127.0.0.1:31337` with:
+
+- **Overview** - live tool call feed, stats (total/allowed/blocked/rate), threat category breakdown, block rate sparkline
+- **Audit Log** - searchable, filterable table of all decisions
+- **Rules** - view active rule patterns, delete rules
+- **Tester** - run test scenarios through the full security pipeline
+
+## Configuration
 
 ```toml
-upstream_command = "node /path/to/server.js"
+upstream_command = "node /path/to/mcp-server.js"
 
 [nebius]
 model = "nvidia/Nemotron-3_5-Lightning"
+base_url = "https://api.tokenfactory.nebius.com/v1/"
 confidence_threshold = 0.7
 
 [rules]
 block_tools = []
-allow_tools = ["tools/list", "initialize"]
-path_block_patterns = ["/etc/.*", "~/.ssh/.*", ".*\.env$"]
-cmd_block_patterns = ["rm .*-rf .*/", "curl.*\|.*sh", "dd of="]
+allow_tools = ["tools/list", "initialize", "notifications/initialized"]
+path_block_patterns = [
+  "/etc/.*",
+  "~/.ssh/.*",
+  ".*\.env$",
+  ".*/\.aws/credentials",
+]
+cmd_block_patterns = [
+  "rm .*-rf .*/",
+  "curl.*\|.*sh",
+  "dd of=",
+  "chmod 777",
+  "mkfs",
+  "shutdown",
+  "kill -9",
+]
 
 [audit]
 log_path = "./warden-audit.jsonl"
 ```
 
-## Dashboard
+## How It Works
 
-When running, Warden serves a live monitoring dashboard at http://127.0.0.1:31337 showing:
-- Real-time tool call feed (allowed/blocked with colors)
-- Stats: total calls, allowed, blocked, block rate
-- Threat category breakdown
-- Active rule patterns
+```
+MCP Client (Claude, Cursor)
+        |
+      stdin | stdout
+        v   ^
+    Warden (Rust binary)
+    - Rule engine: regex patterns block known attacks instantly
+    - LLM classifier: Nemotron analyzes ambiguous calls
+    - Audit log: JSONL with full decision context
+    - Dashboard: Axum server with SSE live events
+        |
+      stdin | stdout
+        v   ^
+    MCP Server (your actual server)
+```
 
-## Demo Scenarios
+## Architecture
 
-1. **Credential Access** - Agent reads `~/.ssh/id_rsa` -> BLOCKED by Nemotron LLM (credential_access)
-2. **Destructive Command** - Agent runs `dd of=/dev/sda` -> BLOCKED by rule engine (instant)
-3. **Safe File Read** - Agent reads project source -> ALLOWED by Nemotron LLM (safe)
-4. **Data Exfiltration** - Agent pipes auth logs through base64+curl -> BLOCKED by Nemotron LLM (data_exfiltration)
-5. **Prompt Injection** - Agent writes file with embedded `curl|bash` -> BLOCKED by rule engine (instant)
+Single Rust binary. No separate frontend, no external services.
 
-## Built For
+- **Proxy** - reads JSON-RPC from stdin, forwards to upstream process via stdin/stdout
+- **Rule engine** - regex-based pattern matching on tool names, paths, and commands
+- **LLM classifier** - sends tool call to Nemotron via Nebius Token Factory API, parses JSON verdict
+- **Dashboard** - Axum web server with embedded HTML, SSE for live events, REST API for audit/rules/test
+- **Audit log** - JSONL file, one line per decision
 
-- **Nebius x NVIDIA Global AI Hackathon** - Coding & Agentic Engineering track
-- Uses NVIDIA Nemotron-3.5-Lightning on Nebius Token Factory
-- OpenAI-compatible API, open-source models, open infrastructure
+## Building from Source
 
-## Tech Stack
+```bash
+git clone https://github.com/dbalchunas2-pixel/warden.git
+cd warden
+cargo build --release
+./target/release/warden
+```
 
-- Rust + Tokio (async runtime)
-- Model Context Protocol (MCP) JSON-RPC 2.0 over stdio
-- Nebius Token Factory API (NVIDIA Nemotron models)
-- Deterministic rule engine (regex patterns)
-- Embedded web dashboard (axum)
-- Append-only audit log (JSONL)
-- Zero external config files - everything compiled into the binary
+## License
+
+MIT
