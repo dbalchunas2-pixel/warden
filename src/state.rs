@@ -5,7 +5,7 @@ use std::collections::VecDeque;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -17,6 +17,9 @@ pub struct AppState {
     pub engine: SharedEngine,
     pub confidence_threshold: f64,
     pub audit_path: String,
+    pub last_call_ms: AtomicU64,
+    pub last_notify: Mutex<std::time::Instant>,
+    pub llm_bucket: Mutex<TokenBucket>,
     pub config: RwLock<toml::Value>,
     pub config_path: RwLock<Option<PathBuf>>,
     pub api_key_config: RwLock<Option<String>>,
@@ -59,7 +62,7 @@ impl AppState {
             .map(|s| s.to_string())
             .filter(|s| !s.trim().is_empty());
 
-        Ok(Self {
+        let st = Self {
             entries: Mutex::new(VecDeque::with_capacity(1000)),
             engine,
             confidence_threshold,
@@ -68,10 +71,15 @@ impl AppState {
             config_path: RwLock::new(config_path),
             api_key_config: RwLock::new(api_key),
             app_handle: RwLock::new(None),
+            last_call_ms: AtomicU64::new(0),
+            last_notify: Mutex::new(std::time::Instant::now()),
+            llm_bucket: Mutex::new(TokenBucket::new()),
             upstream_cmd: RwLock::new(upstream),
             proxy_status: RwLock::new("idle".into()),
             proxy_running: AtomicBool::new(false),
-        })
+        };
+        st.load_audit_history();
+        Ok(st)
     }
 
     pub fn set_handle(&self, h: AppHandle) {
@@ -108,6 +116,43 @@ impl AppState {
             .filter(|s| !s.trim().is_empty())
     }
 
+    /// Restore the last ~1000 audit entries from the JSONL file on startup
+    fn load_audit_history(&self) {
+        if let Ok(content) = std::fs::read_to_string(&self.audit_path) {
+            let mut count = 0usize;
+            for line in content.lines().rev() {
+                if count >= 1000 { break; }
+                if let Ok(v) = serde_json::from_str::<Value>(line) {
+                    self.entries.lock().unwrap().push_front(v);
+                    count += 1;
+                }
+            }
+            if count > 0 {
+                info!("Restored {} audit entries from {}", count, self.audit_path);
+            }
+        }
+    }
+
+    /// Show a macOS notification about a blocked call, but only when the
+    /// window is not focused and not more often than every 10 seconds.
+    pub fn notify_block(&self, title: &str, body: &str) {
+        use tauri::Manager;
+        use tauri_plugin_notification::NotificationExt;
+        let handle = self.app_handle.read().unwrap();
+        let Some(app) = handle.as_ref() else { return };
+        let focused = app
+            .get_webview_window("main")
+            .and_then(|w| w.is_focused().ok())
+            .unwrap_or(false);
+        if focused { return; }
+        {
+            let mut last = self.last_notify.lock().unwrap();
+            if last.elapsed() < std::time::Duration::from_secs(10) { return; }
+            *last = std::time::Instant::now();
+        }
+        let _ = app.notification().builder().title(title).body(body).show();
+    }
+
     pub fn push_event(&self, method: &str, params: &Value, verdict: &str, reason: &str, layer: &str) {
         let params_str = serde_json::to_string(params).unwrap_or_default();
         let head = params_str.get(..1024).unwrap_or(&params_str);
@@ -118,6 +163,7 @@ impl AppState {
         };
         let entry = json!({
             "timestamp": chrono::Utc::now().to_rfc3339(),
+            "ms": self.last_call_ms.load(Ordering::SeqCst),
             "method": method,
             "params": truncated,
             "verdict": verdict,
@@ -196,10 +242,10 @@ impl AppState {
 
 /// Token bucket guarding the LLM classification budget.
 /// Under flood, we stop calling the LLM entirely and fail closed.
-struct TokenBucket {
+pub struct TokenBucket {
     tokens: f64,
-    burst: f64,
-    refill_per_sec: f64,
+    pub burst: f64,
+    pub refill_per_sec: f64,
     last: std::time::Instant,
 }
 
@@ -210,7 +256,15 @@ impl TokenBucket {
         Self { tokens: burst, burst, refill_per_sec: refill, last: std::time::Instant::now() }
     }
 
-    fn try_acquire(&mut self) -> bool {
+    /// Refill passively and report current tokens without spending.
+    pub fn available(&mut self) -> f64 {
+        let now = std::time::Instant::now();
+        self.tokens = (self.tokens + now.duration_since(self.last).as_secs_f64() * self.refill_per_sec).min(self.burst);
+        self.last = now;
+        self.tokens
+    }
+
+    pub fn try_acquire(&mut self) -> bool {
         let now = std::time::Instant::now();
         self.tokens = (self.tokens + now.duration_since(self.last).as_secs_f64() * self.refill_per_sec).min(self.burst);
         self.last = now;
@@ -241,7 +295,6 @@ async fn proxy_loop(state: Arc<AppState>, upstream_cmd: String) -> Result<()> {
     let mut child_stdout = BufReader::new(child.stdout.take().expect("child stdout"));
     let mut stdin = BufReader::new(tokio::io::stdin());
     let mut stdout = tokio::io::stdout();
-    let mut llm_limiter = TokenBucket::new();
 
     info!("Warden proxy running. Tool calls are being inspected.");
 
@@ -262,6 +315,7 @@ async fn proxy_loop(state: Arc<AppState>, upstream_cmd: String) -> Result<()> {
             }
         };
 
+        let call_start = std::time::Instant::now();
         let method = request
             .get("method")
             .and_then(|m| m.as_str())
@@ -280,13 +334,16 @@ async fn proxy_loop(state: Arc<AppState>, upstream_cmd: String) -> Result<()> {
                     if d.allow {
                         info!("ALLOW: {} - {}", method, d.reason);
                         forward(&mut child_stdin, &line).await?;
+                        state.last_call_ms.store(call_start.elapsed().as_millis() as u64, Ordering::SeqCst);
                         state.push_event(&method, &params, "allowed", &d.reason, "rules");
                     } else {
                         warn!("BLOCK: {} - {}", method, d.reason);
                         let err = jsonrpc_error(&request, &d.reason);
                         stdout.write_all(err.as_bytes()).await?;
                         stdout.flush().await?;
+                        state.last_call_ms.store(call_start.elapsed().as_millis() as u64, Ordering::SeqCst);
                         state.push_event(&method, &params, "blocked", &d.reason, "rules");
+                            state.notify_block("Warden blocked a tool call", &d.reason);
                         continue;
                     }
                 }
@@ -299,17 +356,21 @@ async fn proxy_loop(state: Arc<AppState>, upstream_cmd: String) -> Result<()> {
                             let err = jsonrpc_error(&request, reason);
                             stdout.write_all(err.as_bytes()).await?;
                             stdout.flush().await?;
-                            state.push_event(&method, &params, "blocked", reason, "rules");
+                            state.last_call_ms.store(call_start.elapsed().as_millis() as u64, Ordering::SeqCst);
+                        state.push_event(&method, &params, "blocked", reason, "rules");
+                            state.notify_block("Warden blocked a tool call", &reason);
                             continue;
                         }
                         Some(key) => {
-                            if !llm_limiter.try_acquire() {
+                            if !state.llm_bucket.lock().unwrap().try_acquire() {
                                 let reason = "Rate limit exceeded: LLM classification budget exhausted. Blocked fail-closed without calling the LLM.";
                                 warn!("BLOCK: {} - {}", method, reason);
                                 let err = jsonrpc_error(&request, reason);
                                 stdout.write_all(err.as_bytes()).await?;
                                 stdout.flush().await?;
-                                state.push_event(&method, &params, "blocked", reason, "rate-limit");
+                                state.last_call_ms.store(call_start.elapsed().as_millis() as u64, Ordering::SeqCst);
+                        state.push_event(&method, &params, "blocked", reason, "rate-limit");
+                            state.notify_block("Warden rate-limited a tool call", &reason);
                                 continue;
                             }
                             info!("No rule match: {} -> LLM classification", method);
@@ -324,24 +385,29 @@ async fn proxy_loop(state: Arc<AppState>, upstream_cmd: String) -> Result<()> {
                                     if allow {
                                         info!("LLM ALLOW: {}", reason);
                                         forward(&mut child_stdin, &line).await?;
-                                        state.push_event(&method, &params, "allowed", &format!("LLM: {}", reason), "llm");
+                                        state.last_call_ms.store(call_start.elapsed().as_millis() as u64, Ordering::SeqCst);
+                        state.push_event(&method, &params, "allowed", &format!("LLM: {}", reason), "llm");
                                     } else {
                                         warn!("LLM BLOCK: {}", reason);
                                         let msg = format!("Blocked by LLM: {}", reason);
                                         let err = jsonrpc_error(&request, &msg);
                                         stdout.write_all(err.as_bytes()).await?;
                                         stdout.flush().await?;
-                                        state.push_event(&method, &params, "blocked", &msg, "llm");
+                                        state.last_call_ms.store(call_start.elapsed().as_millis() as u64, Ordering::SeqCst);
+                        state.push_event(&method, &params, "blocked", &msg, "llm");
+                            state.notify_block("Warden blocked a tool call", &msg);
                                         continue;
                                     }
                                 }
                                 Err(e) => {
-                                    error!("LLM classification error: {}", e);
+                                    error!("LLM classification error: {:#}", e);
                                     let reason = format!("Classification error: {}", e);
                                     let err = jsonrpc_error(&request, &reason);
                                     stdout.write_all(err.as_bytes()).await?;
                                     stdout.flush().await?;
-                                    state.push_event(&method, &params, "blocked", &reason, "error");
+                                    state.last_call_ms.store(call_start.elapsed().as_millis() as u64, Ordering::SeqCst);
+                        state.push_event(&method, &params, "blocked", &reason, "error");
+                            state.notify_block("Warden blocked a tool call", &reason);
                                     continue;
                                 }
                             }

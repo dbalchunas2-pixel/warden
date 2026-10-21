@@ -1,8 +1,11 @@
 {
   "identifier": "default",
   "description": "Capability for the main window",
-  "windows": ["main"],
+  "windows": [
+    "main"
+  ],
   "permissions": [
-    "core:default"
+    "core:default",
+    "notification:default"
   ]
 }

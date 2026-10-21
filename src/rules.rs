@@ -9,6 +9,12 @@ pub struct RuleEntry {
     #[serde(rename = "type")]
     pub rule_type: String, // "path" or "cmd"
     pub pattern: String,
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+}
+
+fn default_enabled() -> bool {
+    true
 }
 
 pub struct RuleEngine {
@@ -21,6 +27,7 @@ struct CompiledRule {
     rule_type: String,
     pattern: String,
     regex: Regex,
+    enabled: bool,
 }
 
 /// Thread-safe shared rule engine that can be updated at runtime
@@ -36,12 +43,12 @@ impl RuleEngine {
         let mut rules = Vec::new();
         for p in &path_patterns {
             if let Ok(re) = Regex::new(p) {
-                rules.push(CompiledRule { rule_type: "path".into(), pattern: p.clone(), regex: re });
+                rules.push(CompiledRule { rule_type: "path".into(), pattern: p.clone(), regex: re, enabled: true });
             }
         }
         for p in &cmd_patterns {
             if let Ok(re) = Regex::new(p) {
-                rules.push(CompiledRule { rule_type: "cmd".into(), pattern: p.clone(), regex: re });
+                rules.push(CompiledRule { rule_type: "cmd".into(), pattern: p.clone(), regex: re, enabled: true });
             }
         }
 
@@ -53,7 +60,7 @@ impl RuleEngine {
         let mut rules = Vec::new();
         for e in entries {
             if let Ok(re) = Regex::new(&e.pattern) {
-                rules.push(CompiledRule { rule_type: e.rule_type.clone(), pattern: e.pattern.clone(), regex: re });
+                rules.push(CompiledRule { rule_type: e.rule_type.clone(), pattern: e.pattern.clone(), regex: re, enabled: e.enabled });
             }
         }
         Ok(Self { block_tools, allow_tools, rules })
@@ -69,6 +76,7 @@ impl RuleEngine {
         if let Some(strings) = extract_string_fields(params) {
             for s in &strings {
                 for rule in &self.rules {
+                    if !rule.enabled { continue; }
                     if rule.regex.is_match(s) {
                         return Some(Decision {
                             allow: false,
@@ -81,8 +89,15 @@ impl RuleEngine {
         None
     }
 
+    /// Flip a rule's enabled flag by index. Returns the new state.
+    pub fn toggle(&mut self, idx: usize) -> Result<bool> {
+        let rule = self.rules.get_mut(idx).ok_or_else(|| anyhow::anyhow!("Rule index out of range"))?;
+        rule.enabled = !rule.enabled;
+        Ok(rule.enabled)
+    }
+
     pub fn list_rules(&self) -> Vec<RuleEntry> {
-        self.rules.iter().map(|r| RuleEntry { rule_type: r.rule_type.clone(), pattern: r.pattern.clone() }).collect()
+        self.rules.iter().map(|r| RuleEntry { rule_type: r.rule_type.clone(), pattern: r.pattern.clone(), enabled: r.enabled }).collect()
     }
 
     pub fn rule_count(&self) -> usize {

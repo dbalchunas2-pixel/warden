@@ -38,6 +38,7 @@ pub fn add_rule(
     current.push(RuleEntry {
         rule_type: rule_type.clone(),
         pattern: pattern.clone(),
+            enabled: true,
     });
     let block = engine.block_tools.clone();
     let allow = engine.allow_tools.clone();
@@ -66,11 +67,73 @@ pub fn delete_rule(state: State<'_, Arc<AppState>>, idx: usize) -> Result<Value,
 /// Run an arbitrary tool call (method + JSON args) through the full pipeline:
 /// deterministic rules first, then Nemotron LLM classification if no rule matches.
 #[tauri::command]
+pub fn toggle_rule(state: State<'_, Arc<AppState>>, idx: usize) -> Result<Value, String> {
+    let entries = {
+        let mut engine = state.engine.write().unwrap();
+        engine.toggle(idx).map_err(|e| e.to_string())?;
+        engine.list_rules()
+    };
+    persist_rules(&state, &entries)?;
+    Ok(json!({ "ok": true, "enabled": entries[idx].enabled }))
+}
+
+/// Write the full rule list back to the user's warden.toml
+fn persist_rules(state: &Arc<AppState>, entries: &[crate::rules::RuleEntry]) -> Result<(), String> {
+    let path = state.config_path.read().unwrap().as_ref().map(|p| p.display().to_string());
+    let Some(path) = path else { return Ok(()) };
+    let content = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut cfg: toml::Value = content.parse().unwrap_or(toml::Value::Table(Default::default()));
+    let arr: Vec<toml::Value> = entries.iter().map(|r| toml::Value::Table([
+        ("type".to_string(), toml::Value::String(r.rule_type.clone())),
+        ("pattern".to_string(), toml::Value::String(r.pattern.clone())),
+        ("enabled".to_string(), toml::Value::Boolean(r.enabled)),
+    ].into_iter().collect())).collect();
+    if let Some(t) = cfg.as_table_mut() {
+        let rules = t.entry("rules").or_insert_with(|| toml::Value::Table(Default::default()));
+        if let Some(rt) = rules.as_table_mut() {
+            rt.insert("entries".to_string(), toml::Value::Array(arr));
+        }
+    }
+    std::fs::write(&path, toml::to_string_pretty(&cfg).map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())
+}
+
+/// Export the in-memory audit log as CSV to ~/Desktop
+#[tauri::command]
+pub fn export_audit(state: State<'_, Arc<AppState>>) -> Result<Value, String> {
+    let entries: Vec<Value> = state.entries.lock().unwrap().iter().cloned().collect();
+    if entries.is_empty() {
+        return Err("Audit log is empty".into());
+    }
+    let esc = |v: &Value| -> String {
+        let s = v.as_str().unwrap_or(&v.to_string()).to_string();
+        format!("\"{}\"", s.replace('\"', "\"\""))
+    };
+    let mut csv = String::from("timestamp,ms,method,verdict,layer,category,reason,params\n");
+    for e in entries {
+        csv += &format!("{},{},{},{},{},{},{},{}\n",
+            esc(e.get("timestamp").unwrap_or(&json!(""))),
+            esc(e.get("ms").unwrap_or(&json!(""))),
+            esc(e.get("method").unwrap_or(&json!(""))),
+            esc(e.get("verdict").unwrap_or(&json!(""))),
+            esc(e.get("layer").unwrap_or(&json!(""))),
+            esc(e.get("category").unwrap_or(&json!(""))),
+            esc(e.get("reason").unwrap_or(&json!(""))),
+            esc(e.get("params").unwrap_or(&json!(""))));
+    }
+    let home = std::env::var("HOME").map_err(|_| "no HOME".to_string())?;
+    let path = format!("{}/Desktop/warden-audit-{}.csv", home, chrono::Utc::now().format("%Y%m%d-%H%M%S"));
+    std::fs::write(&path, csv).map_err(|e| e.to_string())?;
+    Ok(json!({ "path": path }))
+}
+
+#[tauri::command]
 pub async fn test_tool_call(
     state: State<'_, Arc<AppState>>,
     method: String,
     args_json: String,
 ) -> Result<Value, String> {
+    let t0 = std::time::Instant::now();
     let params: Value = if args_json.trim().is_empty() {
         json!({})
     } else {
@@ -90,7 +153,8 @@ pub async fn test_tool_call(
             "confidence": 1.0,
             "category": "rule_match",
             "method": method,
-            "params": params
+            "params": params,
+            "ms": t0.elapsed().as_millis() as u64
         }));
     }
 
@@ -103,7 +167,8 @@ pub async fn test_tool_call(
                 "category": c.category,
                 "layer": "LLM",
                 "method": method,
-                "params": params
+                "params": params,
+                "ms": t0.elapsed().as_millis() as u64
             })),
             Err(e) => Ok(json!({
                 "verdict": "blocked",
@@ -111,7 +176,8 @@ pub async fn test_tool_call(
                 "layer": "ERROR",
                 "error": e.to_string(),
                 "method": method,
-                "params": params
+                "params": params,
+                "ms": t0.elapsed().as_millis() as u64
             })),
         },
         None => Ok(json!({
@@ -121,7 +187,8 @@ pub async fn test_tool_call(
             "confidence": 1.0,
             "category": "no_key",
             "method": method,
-            "params": params
+            "params": params,
+            "ms": t0.elapsed().as_millis() as u64
         })),
     }
 }
@@ -155,6 +222,10 @@ pub fn get_status(state: State<'_, Arc<AppState>>) -> Value {
         .unwrap()
         .as_ref()
         .map(|p| p.display().to_string());
+    let (bucket_tokens, bucket_burst, bucket_refill) = {
+        let mut b = state.llm_bucket.lock().unwrap();
+        (b.available(), b.burst, b.refill_per_sec)
+    };
     json!({
         "proxy_running": state.proxy_running.load(Ordering::SeqCst),
         "proxy_status": proxy_status,
@@ -162,7 +233,11 @@ pub fn get_status(state: State<'_, Arc<AppState>>) -> Value {
         "llm_enabled": llm_enabled,
         "threshold": state.confidence_threshold,
         "rules": rules,
-        "config_path": config_path
+        "config_path": config_path,
+        "llm_bucket_tokens": (bucket_tokens * 10.0).round() / 10.0,
+        "llm_bucket_burst": bucket_burst,
+        "llm_bucket_refill": bucket_refill,
+        "llm_timeout_secs": 20
     })
 }
 

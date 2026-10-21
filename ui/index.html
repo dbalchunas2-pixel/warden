@@ -103,6 +103,10 @@ header { border-bottom:1px solid var(--border); padding:16px 28px; display:flex;
 .rule-pattern { color:var(--text); flex:1; font-size:10px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .rule-del { background:none; border:none; color:var(--dim); cursor:pointer; font-size:14px; padding:0 4px; }
 .rule-del:hover { color:var(--danger); }
+.rule-toggle { background:none; border:1px solid var(--border); color:var(--dim); cursor:pointer; font-family:var(--mono); font-size:9px; font-weight:700; padding:3px 8px; border-radius:3px; }
+.rule-toggle:hover { border-color:var(--accent); color:var(--accent); }
+.rule-off .rule-pattern, .rule-off .rule-type { opacity:0.35; text-decoration:line-through; }
+.rule-off { opacity:0.7; }
 .rule-add { display:flex; gap:6px; margin-top:10px; }
 .rule-add select, .rule-add input { background:var(--bg); border:1px solid var(--border); color:var(--text); padding:6px 8px; border-radius:4px; font-family:var(--mono); font-size:11px; }
 .rule-add input { flex:1; }
@@ -120,6 +124,8 @@ header { border-bottom:1px solid var(--border); padding:16px 28px; display:flex;
 .audit-table td { padding:7px 12px; border-bottom:1px solid var(--border); }
 .audit-table tr:hover { background:var(--panel); }
 .filter-bar { display:flex; gap:10px; margin-bottom:14px; align-items:center; }
+.export-btn { background:var(--panel); border:1px solid var(--border); color:var(--text); padding:7px 12px; border-radius:5px; cursor:pointer; font-family:var(--mono); font-size:11px; }
+.export-btn:hover { border-color:var(--accent); color:var(--accent); }
 .filter-bar input, .filter-bar select { background:var(--panel); border:1px solid var(--border); color:var(--text); padding:7px 10px; border-radius:5px; font-family:var(--mono); font-size:11px; }
 .filter-bar input { flex:1; }
 .badge { font-size:9px; padding:2px 7px; border-radius:3px; font-weight:700; text-transform:uppercase; }
@@ -216,6 +222,8 @@ header { border-bottom:1px solid var(--border); padding:16px 28px; display:flex;
           <div>Model: <span style="color:var(--text)">Nemotron-3.5-Lightning</span></div>
           <div>Threshold: <span style="color:var(--text)" id="info-threshold">0.70</span></div>
           <div>LLM: <span style="color:var(--text)" id="info-llm">-</span></div>
+          <div>LLM Budget: <span style="color:var(--text)" id="info-budget">-</span></div>
+          <div>Classify Timeout: <span style="color:var(--text)" id="info-timeout">20s (fail-closed)</span></div>
           <div>Backend: <span style="color:var(--text)">Nebius Token Factory</span></div>
           <div>Protocol: <span style="color:var(--text)">MCP JSON-RPC 2.0</span></div>
         </div>
@@ -235,6 +243,7 @@ header { border-bottom:1px solid var(--border); padding:16px 28px; display:flex;
         <option value="blocked">Blocked only</option>
         <option value="allowed">Allowed only</option>
       </select>
+      <button class="export-btn" onclick="exportAudit()">Export CSV</button>
     </div>
     <table class="audit-table">
       <thead><tr><th>Time</th><th>Method</th><th>Reason</th><th>Verdict</th><th>Layer</th></tr></thead>
@@ -284,7 +293,7 @@ header { border-bottom:1px solid var(--border); padding:16px 28px; display:flex;
     </div>
     <div class="tester-field">
       <div class="tester-label">Params (JSON)</div>
-      <textarea id="test-params">{"name": "filesystem.read", "arguments": {"path": "/Users/david/.ssh/id_rsa"}}</textarea>
+      <textarea id="test-params" onkeydown="if((event.metaKey||event.ctrlKey)&&event.key==='Enter'){event.preventDefault();runTest();}">{"name": "filesystem.read", "arguments": {"path": "/Users/david/.ssh/id_rsa"}}</textarea>
     </div>
     <button onclick="runTest()">Run Through Pipeline</button>
     <div class="tester-result" id="test-result">
@@ -357,7 +366,8 @@ function addFeedEntry(entry) {
   const m = entry.method || '?';
   const r = entry.reason || '';
   const layer = (entry.layer || '').toUpperCase() || (r.includes('rule')||r.includes('Rule') ? 'RULES' : r.includes('LLM')||r.includes('Nemotron') ? 'LLM' : '');
-  el.innerHTML = '<div class="entry-time">'+t+'</div><div><div class="entry-method">'+esc(m)+'</div><div class="entry-reason">'+esc(r)+'</div></div><div class="entry-verdict '+v+'">'+v+'</div><div class="entry-layer">'+layer+'</div>';
+  const ms = entry.ms ? (entry.ms > 999 ? (entry.ms/1000).toFixed(1)+'s' : entry.ms+'ms') : '';
+  el.innerHTML = '<div class="entry-time">'+t+'</div><div><div class="entry-method">'+esc(m)+'</div><div class="entry-reason">'+esc(r)+'</div></div><div class="entry-verdict '+v+'">'+v+'</div><div class="entry-layer">'+(ms?ms+' · ':'')+layer+'</div>';
   feed.insertBefore(el, feed.firstChild);
   while (feed.children.length > 100) feed.removeChild(feed.lastChild);
 }
@@ -425,7 +435,8 @@ async function renderRules() {
     document.getElementById('s-rules').textContent = rules.length;
     let html = '';
     rules.forEach((rule,i) => {
-      html += '<div class="rule-item"><span class="rule-type '+rule.type+'">'+rule.type+'</span><span class="rule-pattern">'+esc(rule.pattern)+'</span><button class="rule-del" onclick="delRule('+i+')">×</button></div>';
+      const on = rule.enabled !== false;
+      html += '<div class="rule-item'+(on?'':' rule-off')+'"><span class="rule-type '+rule.type+'">'+rule.type+'</span><span class="rule-pattern">'+esc(rule.pattern)+'</span><button class="rule-toggle" onclick="toggleRule('+i+')">'+(on?'ON':'OFF')+'</button><button class="rule-del" onclick="delRule('+i+')">×</button></div>';
     });
     document.getElementById('rule-list').innerHTML = html || '<div style="color:var(--dim);padding:14px">No rules configured</div>';
   } catch(e) { console.error(e); }
@@ -440,6 +451,18 @@ async function addRule() {
     document.getElementById('rule-pattern').value = '';
     renderRules();
   } catch(e) { alert(String(e)); }
+}
+
+async function exportAudit() {
+  try {
+    const r = await invoke('export_audit');
+    alert('Audit log exported to: ' + r.path);
+  } catch(e) { alert(String(e)); }
+}
+
+async function toggleRule(idx) {
+  try { await invoke('toggle_rule', { idx: idx }); renderRules(); }
+  catch(e) { alert(String(e)); }
 }
 
 async function delRule(idx) {
@@ -468,7 +491,7 @@ async function runTest() {
     document.getElementById('test-reason').textContent = r.reason || r.error || '';
     const meta = document.getElementById('test-meta');
     if (r.confidence !== undefined) {
-      meta.innerHTML = '<span>Confidence: <b>'+r.confidence+'</b></span><span>Category: <b>'+esc(r.category||'')+'</b></span><span>Layer: <b>'+(r.layer||'LLM')+'</b></span>';
+      meta.innerHTML = '<span>Confidence: <b>'+r.confidence+'</b></span><span>Category: <b>'+esc(r.category||'')+'</b></span><span>Layer: <b>'+(r.layer||'LLM')+'</b></span><span>Latency: <b>'+(r.ms!==undefined?r.ms+'ms':'-')+'</b></span>';
     } else { meta.innerHTML = ''; }
   } catch(e) {
     result.classList.add('show','blocked');
@@ -493,6 +516,10 @@ async function applyStatus() {
     document.getElementById('info-upstream').textContent = appStatus.upstream || 'not configured';
     document.getElementById('info-threshold').textContent = appStatus.threshold !== undefined ? appStatus.threshold.toFixed(2) : '0.70';
     document.getElementById('info-llm').textContent = appStatus.llm_enabled ? 'enabled (Nemotron)' : 'disabled (conservative block)';
+    if (appStatus.llm_bucket_burst !== undefined) {
+      document.getElementById('info-budget').textContent = appStatus.llm_bucket_tokens + ' / ' + appStatus.llm_bucket_burst + ' tokens (refill ' + appStatus.llm_bucket_refill + '/s, fail-closed)';
+    }
+    document.getElementById('info-timeout').textContent = (appStatus.llm_timeout_secs || 20) + 's (fail-closed)';
     return appStatus;
   } catch(e) { console.error(e); return null; }
 }

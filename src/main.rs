@@ -132,11 +132,15 @@ fn main() {
 
     tauri::Builder::default()
         .manage(state.clone())
+        .plugin(tauri_plugin_window_state::Builder::default().build())
+        .plugin(tauri_plugin_notification::init())
         .invoke_handler(tauri::generate_handler![
             commands::get_audit_log,
             commands::get_rules,
             commands::add_rule,
             commands::delete_rule,
+        commands::toggle_rule,
+        commands::export_audit,
             commands::test_tool_call,
             commands::get_stats,
             commands::get_status,
