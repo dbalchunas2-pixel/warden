@@ -394,7 +394,8 @@ header { border-bottom:1px solid var(--border); padding:16px 28px; display:flex;
     <div class="setup-hint" id="setup-api-hint">Checking for NEBIUS_API_KEY...</div>
     <div class="setup-field">
       <label>Upstream MCP Server Command</label>
-      <input id="setup-upstream" placeholder="node /path/to/mcp-server.js">
+      <input id="setup-upstream" placeholder="npx some-mcp-server">
+      <div class="setup-hint" style="margin-top:6px">Any local stdio MCP works: <span style="color:var(--text)">npx some-mcp-server</span>, <span style="color:var(--text)">node /path/to/server.js</span>, <span style="color:var(--text)">uvx some-python-mcp</span>. Remote HTTP/SSE server? Bridge it: <span style="color:var(--text)">npx mcp-remote https://your-server.com/mcp</span> - calls still pass through Warden.</div>
     </div>
     <div class="setup-field">
       <label>Nebius API Key (optional - enables LLM classification)</label>
