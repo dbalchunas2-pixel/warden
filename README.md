@@ -169,4 +169,4 @@ npx @tauri-apps/cli@2 build                # Warden.app + dmg installer
 
 ## License
 
-MIT
+Apache-2.0
