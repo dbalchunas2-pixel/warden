@@ -1,10 +1,12 @@
 mod rules;
 mod classify;
+mod dashboard;
 
 use anyhow::Result;
 use clap::Parser;
 use serde_json::Value;
 use std::process::Stdio;
+use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command as TokioCommand;
 use tracing::{error, info, warn};
@@ -25,6 +27,10 @@ struct Args {
     /// Command to launch upstream MCP server (overrides config)
     #[arg(short, long)]
     upstream: Option<String>,
+
+    /// Dashboard port (default 31337)
+    #[arg(long, default_value = "31337")]
+    port: u16,
 }
 
 #[tokio::main]
@@ -52,6 +58,11 @@ async fn main() -> Result<()> {
     let rule_engine = RuleEngine::new(rules_config)?;
     info!("Rule engine initialized");
 
+    // Initialize dashboard
+    let dash_state = Arc::new(dashboard::DashboardState::new());
+    dashboard::start(dash_state.clone(), args.port);
+    info!("Dashboard: http://127.0.0.1:{}", args.port);
+
     // Determine upstream command
     let upstream_cmd = if let Some(ref u) = args.upstream {
         u.clone()
@@ -63,7 +74,6 @@ async fn main() -> Result<()> {
             .ok_or_else(|| anyhow::anyhow!("No upstream command in config or CLI"))?
     };
 
-    // Split upstream command into program + args
     let parts: Vec<&str> = upstream_cmd.split_whitespace().collect();
     if parts.is_empty() {
         anyhow::bail!("Empty upstream command");
@@ -109,7 +119,7 @@ async fn main() -> Result<()> {
         line.clear();
         let n = stdin.read_line(&mut line).await?;
         if n == 0 {
-            break; // EOF
+            break;
         }
 
         let request: Value = match serde_json::from_str(&line) {
@@ -126,7 +136,6 @@ async fn main() -> Result<()> {
             .unwrap_or("");
         let params = request.get("params").cloned().unwrap_or(Value::Null);
 
-        // Determine if this is a tool call that needs interception
         let intercept = method.starts_with("tools/");
 
         if intercept {
@@ -135,16 +144,16 @@ async fn main() -> Result<()> {
                     if decision.allow {
                         info!("Rule engine ALLOW: {} - {}", method, decision.reason);
                         forward(&mut child_stdin, &line).await?;
+                        push_audit(audit_path, &dash_state, method, &params, "allowed", &decision.reason);
                     } else {
                         warn!("Rule engine BLOCK: {} - {}", method, decision.reason);
                         let err = jsonrpc_error(&request, -32603, &decision.reason);
                         stdout.write_all(err.as_bytes()).await?;
-                        log_audit(audit_path, method, &params, "blocked", &decision.reason).await;
+                        push_audit(audit_path, &dash_state, method, &params, "blocked", &decision.reason);
                         continue;
                     }
                 }
                 None => {
-                    // No rule matched, call LLM classification
                     info!("No rule match for {}, sending to LLM classifier", method);
                     match classify::classify_tool_call(method, &params).await {
                         Ok(classification) => {
@@ -161,43 +170,35 @@ async fn main() -> Result<()> {
 
                             if allow {
                                 forward(&mut child_stdin, &line).await?;
-                                log_audit(
-                                    audit_path,
-                                    method,
-                                    &params,
-                                    "allowed",
-                                    &format!(
-                                        "LLM: {} ({:.2})",
-                                        classification.reasoning, classification.confidence
-                                    ),
-                                )
-                                .await;
+                                let reason = format!(
+                                    "LLM: {} ({:.2}) category: {}",
+                                    classification.reasoning, classification.confidence, classification.category
+                                );
+                                push_audit(audit_path, &dash_state, method, &params, "allowed", &reason);
                             } else {
                                 let reason = format!(
-                                    "Blocked by LLM classifier: {} (confidence: {:.2})",
-                                    classification.reasoning, classification.confidence
+                                    "Blocked by LLM: {} (confidence: {:.2}) category: {}",
+                                    classification.reasoning, classification.confidence, classification.category
                                 );
                                 warn!("{}", reason);
                                 let err = jsonrpc_error(&request, -32603, &reason);
                                 stdout.write_all(err.as_bytes()).await?;
-                                log_audit(audit_path, method, &params, "blocked", &reason).await;
+                                push_audit(audit_path, &dash_state, method, &params, "blocked", &reason);
                                 continue;
                             }
                         }
                         Err(e) => {
                             error!("LLM classification error: {}", e);
-                            // Conservative: block on classification failure
                             let reason = format!("Classification error: {}", e);
                             let err = jsonrpc_error(&request, -32603, &reason);
                             stdout.write_all(err.as_bytes()).await?;
-                            log_audit(audit_path, method, &params, "blocked", &reason).await;
+                            push_audit(audit_path, &dash_state, method, &params, "blocked", &reason);
                             continue;
                         }
                     }
                 }
             }
         } else {
-            // Non-tool request (initialize, notifications, tools/list), forward directly
             forward(&mut child_stdin, &line).await?;
         }
 
@@ -209,11 +210,9 @@ async fn main() -> Result<()> {
             break;
         }
 
-        // Write response back to client
         stdout.write_all(resp_line.as_bytes()).await?;
     }
 
-    // Clean up
     let _ = child.kill().await;
     info!("Warden shutting down");
     Ok(())
@@ -236,10 +235,16 @@ fn jsonrpc_error(request: &Value, code: i64, message: &str) -> String {
         + "\n"
 }
 
-async fn log_audit(path: &str, method: &str, params: &Value, verdict: &str, reason: &str) {
+fn push_audit(
+    path: &str,
+    dash_state: &Arc<dashboard::DashboardState>,
+    method: &str,
+    params: &Value,
+    verdict: &str,
+    reason: &str,
+) {
     use chrono::Utc;
 
-    // Truncate params in audit log
     let params_str = serde_json::to_string(params).unwrap_or_default();
     let truncated = if params_str.len() > 1024 {
         format!("{}...[truncated]", &params_str[..1024])
@@ -255,6 +260,7 @@ async fn log_audit(path: &str, method: &str, params: &Value, verdict: &str, reas
         "reason": reason,
     });
 
+    // Write to file
     if let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -263,4 +269,7 @@ async fn log_audit(path: &str, method: &str, params: &Value, verdict: &str, reas
         use std::io::Write;
         let _ = writeln!(file, "{}", entry);
     }
+
+    // Push to dashboard
+    dash_state.push_entry(entry);
 }
