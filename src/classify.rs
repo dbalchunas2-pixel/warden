@@ -54,7 +54,8 @@ pub async fn classify_tool_call(method: &str, params: &Value, api_key: &str) -> 
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_msg}
         ],
-        "temperature": 0.1,
+        "temperature": 0.0,
+        "seed": 42,
         "max_tokens": 4096,
     });
 

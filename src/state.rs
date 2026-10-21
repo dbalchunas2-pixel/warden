@@ -5,6 +5,7 @@ use std::collections::VecDeque;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use tauri::{AppHandle, Emitter};
@@ -20,6 +21,7 @@ pub struct AppState {
     pub last_call_ms: AtomicU64,
     pub last_notify: Mutex<std::time::Instant>,
     pub llm_bucket: Mutex<TokenBucket>,
+    verdict_cache: Mutex<HashMap<u64, crate::classify::Classification>>,
     pub config: RwLock<toml::Value>,
     pub config_path: RwLock<Option<PathBuf>>,
     pub api_key_config: RwLock<Option<String>>,
@@ -74,6 +76,7 @@ impl AppState {
             last_call_ms: AtomicU64::new(0),
             last_notify: Mutex::new(std::time::Instant::now()),
             llm_bucket: Mutex::new(TokenBucket::new()),
+            verdict_cache: Mutex::new(HashMap::new()),
             upstream_cmd: RwLock::new(upstream),
             proxy_status: RwLock::new("idle".into()),
             proxy_running: AtomicBool::new(false),
@@ -131,6 +134,23 @@ impl AppState {
                 info!("Restored {} audit entries from {}", count, self.audit_path);
             }
         }
+    }
+
+    /// Deterministic classification: identical (method, params) always gets
+    /// the same verdict within a session - no re-rolling the LLM dice.
+    pub async fn classify_cached(&self, method: &str, params: &Value, api_key: &str) -> Result<crate::classify::Classification> {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        method.hash(&mut h);
+        serde_json::to_string(params).unwrap_or_default().hash(&mut h);
+        let k = h.finish();
+        if let Some(c) = self.verdict_cache.lock().unwrap().get(&k) {
+            tracing::info!("Verdict cache hit for {} (deterministic)", method);
+            return Ok(c.clone());
+        }
+        let c = crate::classify::classify_tool_call(method, params, api_key).await?;
+        self.verdict_cache.lock().unwrap().insert(k, c.clone());
+        Ok(c)
     }
 
     /// Show a macOS notification about a blocked call, but only when the
@@ -374,7 +394,7 @@ async fn proxy_loop(state: Arc<AppState>, upstream_cmd: String) -> Result<()> {
                                 continue;
                             }
                             info!("No rule match: {} -> LLM classification", method);
-                            match crate::classify::classify_tool_call(&method, &params, &key).await {
+                            match state.classify_cached(&method, &params, &key).await {
                                 Ok(c) => {
                                     let allow =
                                         c.verdict == "allow" && c.confidence >= state.confidence_threshold;

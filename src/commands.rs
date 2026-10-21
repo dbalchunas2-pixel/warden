@@ -159,7 +159,7 @@ pub async fn test_tool_call(
     }
 
     match state.api_key() {
-        Some(key) => match classify::classify_tool_call(&method, &params, &key).await {
+        Some(key) => match state.classify_cached(&method, &params, &key).await {
             Ok(c) => Ok(json!({
                 "verdict": c.verdict,
                 "reason": c.reasoning,
