@@ -2,6 +2,7 @@ use crate::classify;
 use crate::rules::{RuleEngine, RuleEntry};
 use crate::state::AppState;
 use serde_json::{json, Value};
+use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tauri::State;
@@ -25,6 +26,7 @@ pub fn add_rule(
     rule_type: String,
     pattern: String,
 ) -> Result<Value, String> {
+    gate(&state)?;
     if pattern.trim().is_empty() {
         return Err("Pattern is empty".into());
     }
@@ -50,6 +52,7 @@ pub fn add_rule(
 
 #[tauri::command]
 pub fn delete_rule(state: State<'_, Arc<AppState>>, idx: usize) -> Result<Value, String> {
+    gate(&state)?;
     let mut engine = state.engine.write().unwrap();
     let mut current = engine.list_rules();
     if idx >= current.len() {
@@ -68,6 +71,7 @@ pub fn delete_rule(state: State<'_, Arc<AppState>>, idx: usize) -> Result<Value,
 /// deterministic rules first, then Nemotron LLM classification if no rule matches.
 #[tauri::command]
 pub fn toggle_rule(state: State<'_, Arc<AppState>>, idx: usize) -> Result<Value, String> {
+    gate(&state)?;
     let entries = {
         let mut engine = state.engine.write().unwrap();
         engine.toggle(idx).map_err(|e| e.to_string())?;
@@ -248,6 +252,7 @@ pub fn save_setup(
     upstream: String,
     api_key: Option<String>,
 ) -> Result<Value, String> {
+    gate(&state)?;
     if upstream.trim().is_empty() {
         return Err("Upstream command is empty".into());
     }
@@ -276,3 +281,284 @@ pub fn start_proxy(state: State<'_, Arc<AppState>>) -> Result<Value, String> {
         _ => Err("No upstream configured".into()),
     }
 }
+
+// ---------- Auth: master password + GitHub identity ----------
+
+/// Policy-mutating commands require the dashboard to be unlocked.
+fn gate(state: &Arc<AppState>) -> Result<(), String> {
+    if crate::auth::has_master_password() && !state.unlocked.load(Ordering::SeqCst) {
+        return Err("Warden is locked. Unlock to change policy.".into());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn auth_status(state: State<'_, Arc<AppState>>) -> Value {
+    json!({
+        "has_password": crate::auth::has_master_password(),
+        "unlocked": state.unlocked.load(Ordering::SeqCst),
+        "identity": crate::auth::identity()
+    })
+}
+
+#[tauri::command]
+pub fn set_master_password(state: State<'_, Arc<AppState>>, password: String) -> Result<Value, String> {
+    if crate::auth::has_master_password() {
+        gate(&state)?;
+    }
+    crate::auth::set_master_password(&password).map_err(|e| format!("{:#}", e))?;
+    state.unlocked.store(true, Ordering::SeqCst);
+    Ok(json!({"ok": true}))
+}
+
+#[tauri::command]
+pub fn unlock(state: State<'_, Arc<AppState>>, password: String) -> Result<Value, String> {
+    if !crate::auth::has_master_password() {
+        return Err("No master password configured yet.".into());
+    }
+    match crate::auth::verify_master_password(&password) {
+        Ok(true) => {
+            state.unlocked.store(true, Ordering::SeqCst);
+            Ok(json!({"ok": true}))
+        }
+        Ok(false) => Err("Incorrect password".into()),
+        Err(e) => Err(format!("Auth error: {:#}", e)),
+    }
+}
+
+#[tauri::command]
+pub fn lock_app(state: State<'_, Arc<AppState>>) -> Value {
+    state.unlocked.store(false, Ordering::SeqCst);
+    json!({"ok": true})
+}
+
+fn oauth_client_id(state: &Arc<AppState>) -> Option<String> {
+    if let Ok(v) = std::env::var("WARDEN_GITHUB_CLIENT_ID") {
+        if !v.trim().is_empty() {
+            return Some(v.trim().to_string());
+        }
+    }
+    state
+        .config
+        .read()
+        .unwrap()
+        .get("auth")
+        .and_then(|a| a.get("github_client_id"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+#[tauri::command]
+pub async fn oauth_start(state: State<'_, Arc<AppState>>) -> Result<Value, String> {
+    let cid = oauth_client_id(&state).ok_or_else(|| {
+        "GitHub OAuth not configured. Set WARDEN_GITHUB_CLIENT_ID or [auth] github_client_id in warden.toml.".to_string()
+    })?;
+    let dc = crate::auth::device_start(&cid).await.map_err(|e| format!("{:#}", e))?;
+    let _ = std::process::Command::new("open").arg(&dc.verification_uri).spawn();
+    Ok(json!({
+        "device_code": dc.device_code,
+        "user_code": dc.user_code,
+        "verification_uri": dc.verification_uri,
+        "interval": dc.interval
+    }))
+}
+
+#[tauri::command]
+pub async fn oauth_check(state: State<'_, Arc<AppState>>, device_code: String) -> Result<Value, String> {
+    let cid = oauth_client_id(&state)
+        .ok_or_else(|| "GitHub OAuth not configured".to_string())?;
+    match crate::auth::device_poll(&cid, &device_code).await.map_err(|e| format!("{:#}", e))? {
+        None => Ok(json!({"linked": false})),
+        Some(token) => {
+            let login = crate::auth::fetch_login(&token).await.map_err(|e| format!("{:#}", e))?;
+            crate::auth::save_identity(&token, &login).map_err(|e| format!("{:#}", e))?;
+            Ok(json!({"linked": true, "login": login}))
+        }
+    }
+}
+
+// ---------- MCP server registry ----------
+// Each registered server gets its own warden.toml (own rules baseline + own
+// audit log) and a copy-paste client config. No routing, no aggregation:
+// Warden stays a single-server stdio gateway per instance.
+
+fn config_target(state: &Arc<AppState>) -> Result<PathBuf, String> {
+    let cur = state.config_path.read().unwrap().clone();
+    if let Some(p) = cur {
+        return Ok(p);
+    }
+    let home = std::env::var("HOME").map_err(|_| "no HOME".to_string())?;
+    let dir = PathBuf::from(&home).join("Library/Application Support/Warden");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir.join("warden.toml"))
+}
+
+fn servers_dir() -> Result<PathBuf, String> {
+    let home = std::env::var("HOME").map_err(|_| "no HOME".to_string())?;
+    let dir = PathBuf::from(&home).join("Library/Application Support/Warden/servers");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir)
+}
+
+fn safe_name(name: &str) -> String {
+    name.trim()
+        .to_lowercase()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string()
+}
+
+fn read_servers(state: &Arc<AppState>) -> Result<Vec<Value>, String> {
+    let path = config_target(state)?;
+    let content = std::fs::read_to_string(&path).unwrap_or_default();
+    let cfg: toml::Value = content.parse().unwrap_or(toml::Value::Table(Default::default()));
+    let arr = cfg
+        .get("servers")
+        .and_then(|s| s.as_array())
+        .cloned()
+        .unwrap_or_default();
+    Ok(arr
+        .iter()
+        .filter_map(|v| {
+            let name = v.get("name").and_then(|x| x.as_str())?;
+            let command = v.get("command").and_then(|x| x.as_str())?;
+            let added = v.get("added").and_then(|x| x.as_str()).unwrap_or("");
+            Some(json!({"name": name, "command": command, "added": added}))
+        })
+        .collect())
+}
+
+fn write_servers(state: &Arc<AppState>, servers: &[Value]) -> Result<PathBuf, String> {
+    let path = config_target(state)?;
+    let content = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut cfg: toml::Value = content.parse().unwrap_or(toml::Value::Table(Default::default()));
+    let arr: Vec<toml::Value> = servers
+        .iter()
+        .map(|s| {
+            toml::Value::Table(
+                [
+                    ("name".to_string(), toml::Value::String(s["name"].as_str().unwrap_or("").to_string())),
+                    ("command".to_string(), toml::Value::String(s["command"].as_str().unwrap_or("").to_string())),
+                    ("added".to_string(), toml::Value::String(s["added"].as_str().unwrap_or("").to_string())),
+                ]
+                .into_iter()
+                .collect(),
+            )
+        })
+        .collect();
+    if let Some(t) = cfg.as_table_mut() {
+        t.insert("servers".to_string(), toml::Value::Array(arr));
+    }
+    std::fs::write(&path, toml::to_string_pretty(&cfg).map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?;
+    Ok(path)
+}
+
+fn generate_server_config(state: &Arc<AppState>, name: &str, command: &str) -> Result<PathBuf, String> {
+    let dir = servers_dir()?;
+    let path = config_target(state)?;
+    let content = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut cfg: toml::Value = content.parse().unwrap_or(toml::Value::Table(Default::default()));
+    if let Some(t) = cfg.as_table_mut() {
+        t.insert("upstream_command".to_string(), toml::Value::String(command.to_string()));
+        if let Some(a) = t.get_mut("audit").and_then(|v| v.as_table_mut()) {
+            a.insert(
+                "log_path".to_string(),
+                toml::Value::String(dir.join(format!("{}-audit.jsonl", name)).display().to_string()),
+            );
+        }
+    }
+    let out = dir.join(format!("{}.toml", name));
+    std::fs::write(&out, toml::to_string_pretty(&cfg).map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?;
+    Ok(out)
+}
+
+#[tauri::command]
+pub fn list_servers(state: State<'_, Arc<AppState>>) -> Vec<Value> {
+    read_servers(&state).unwrap_or_default()
+}
+
+#[tauri::command]
+pub fn add_server(state: State<'_, Arc<AppState>>, name: String, command: String) -> Result<Value, String> {
+    gate(&state)?;
+    let clean = safe_name(&name);
+    if clean.is_empty() {
+        return Err("Server name is empty".into());
+    }
+    if command.trim().is_empty() {
+        return Err("Upstream command is empty".into());
+    }
+    let mut servers = read_servers(&state)?;
+    servers.retain(|s| s["name"].as_str() != Some(&clean));
+    servers.push(json!({
+        "name": clean.clone(),
+        "command": command.trim(),
+        "added": chrono::Utc::now().to_rfc3339()
+    }));
+    write_servers(&state, &servers)?;
+    let cfg_path = generate_server_config(&state, &clean, command.trim())?;
+    Ok(json!({
+        "ok": true,
+        "name": clean,
+        "config_path": cfg_path.display().to_string(),
+        "total": servers.len()
+    }))
+}
+
+#[tauri::command]
+pub fn remove_server(state: State<'_, Arc<AppState>>, name: String) -> Result<Value, String> {
+    gate(&state)?;
+    let clean = safe_name(&name);
+    let mut servers = read_servers(&state)?;
+    let before = servers.len();
+    servers.retain(|s| s["name"].as_str() != Some(&clean));
+    if servers.len() == before {
+        return Err(format!("No server named '{}'", clean));
+    }
+    write_servers(&state, &servers)?;
+    let dir = servers_dir()?;
+    let _ = std::fs::remove_file(dir.join(format!("{}.toml", clean)));
+    let _ = std::fs::remove_file(dir.join(format!("{}-audit.jsonl", clean)));
+    Ok(json!({"ok": true, "total": servers.len()}))
+}
+
+/// Copy-paste client config (Claude Desktop / Claude Code .mcp.json shape)
+/// pointing the client at the warden binary with this server's config.
+#[tauri::command]
+pub fn client_snippet(state: State<'_, Arc<AppState>>, name: String) -> Result<Value, String> {
+    let clean = safe_name(&name);
+    let servers = read_servers(&state)?;
+    let entry = servers
+        .iter()
+        .find(|s| s["name"].as_str() == Some(&clean))
+        .ok_or_else(|| format!("No server named '{}'", clean))?;
+    let dir = servers_dir()?;
+    let cfg_path = dir.join(format!("{}.toml", clean));
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let mut server_cfg = serde_json::Map::new();
+    server_cfg.insert("command".to_string(), json!(exe.display().to_string()));
+    server_cfg.insert(
+        "args".to_string(),
+        json!(["--config", cfg_path.display().to_string()]),
+    );
+    let mut servers_map = serde_json::Map::new();
+    servers_map.insert(clean.clone(), Value::Object(server_cfg));
+    let snippet = serde_json::to_string_pretty(&json!({"mcpServers": Value::Object(servers_map)}))
+        .map_err(|e| e.to_string())?;
+    Ok(json!({
+        "snippet": snippet,
+        "config_path": cfg_path.display().to_string(),
+        "command": entry["command"].as_str().unwrap_or("")
+    }))
+}
+

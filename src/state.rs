@@ -29,6 +29,7 @@ pub struct AppState {
     pub upstream_cmd: RwLock<Option<String>>,
     pub proxy_status: RwLock<String>,
     pub proxy_running: AtomicBool,
+    pub unlocked: AtomicBool,
 }
 
 impl AppState {
@@ -80,6 +81,7 @@ impl AppState {
             upstream_cmd: RwLock::new(upstream),
             proxy_status: RwLock::new("idle".into()),
             proxy_running: AtomicBool::new(false),
+            unlocked: AtomicBool::new(false),
         };
         st.load_audit_history();
         Ok(st)

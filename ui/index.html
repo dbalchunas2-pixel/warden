@@ -181,12 +181,14 @@ header { border-bottom:1px solid var(--border); padding:16px 28px; display:flex;
     <span class="logo-sub">MCP Security Gateway</span>
   </div>
   <div class="nav">
-    <button class="nav-btn active" data-view="overview" onclick="showView('overview')">Overview</button>
-    <button class="nav-btn" data-view="audit" onclick="showView('audit')">Audit Log</button>
-    <button class="nav-btn" data-view="rules" onclick="showView('rules')">Rules</button>
-    <button class="nav-btn" data-view="tester" onclick="showView('tester')">Tester</button>
+    <button class="nav-btn active" data-view="overview" onclick="showView('overview', this)">Overview</button>
+    <button class="nav-btn" data-view="servers" onclick="showView('servers', this)">Servers</button>
+    <button class="nav-btn" data-view="audit" onclick="showView('audit', this)">Audit Log</button>
+    <button class="nav-btn" data-view="rules" onclick="showView('rules', this)">Rules</button>
+    <button class="nav-btn" data-view="tester" onclick="showView('tester', this)">Tester</button>
   </div>
   <div class="status-pill"><span class="status-dot" id="status-dot"></span><span id="status-text">Connecting...</span></div>
+  <button class="nav-btn" id="lock-btn" onclick="lockNow()" style="display:none">Lock</button>
 </header>
 
 <!-- Overview -->
@@ -220,6 +222,7 @@ header { border-bottom:1px solid var(--border); padding:16px 28px; display:flex;
           <div>Status: <span style="color:var(--text)" id="info-status">-</span></div>
           <div>Upstream: <span style="color:var(--text)" id="info-upstream">-</span></div>
           <div>Model: <span style="color:var(--text)">Nemotron-3.5-Lightning</span></div>
+          <div>Identity: <span style="color:var(--text)" id="info-identity">-</span></div>
           <div>Threshold: <span style="color:var(--text)" id="info-threshold">0.70</span></div>
           <div>LLM: <span style="color:var(--text)" id="info-llm">-</span></div>
           <div>LLM Budget: <span style="color:var(--text)" id="info-budget">-</span></div>
@@ -304,6 +307,42 @@ header { border-bottom:1px solid var(--border); padding:16px 28px; display:flex;
   </div>
 </div>
 
+<!-- Servers -->
+<div class="view" id="view-servers">
+  <div style="padding:18px 22px;max-width:820px">
+    <div class="section-title">Protected MCP Servers</div>
+    <p style="color:var(--dim);font-size:11px;margin-bottom:16px;line-height:1.6">Each server gets its own Warden config and audit log - same rules engine, same fail-closed pipeline. Copy the client config and paste it into your MCP client; Warden inspects every call that server makes.</p>
+    <div class="rule-add">
+      <input id="srv-name" placeholder="Name, e.g. terminal-mcp" style="flex:0 0 180px">
+      <input id="srv-cmd" placeholder="Upstream command, e.g. node /path/to/server.js" onkeydown="if(event.key==='Enter')addServer()">
+      <button onclick="addServer()">Add Server</button>
+    </div>
+    <div class="rule-list" id="server-list" style="margin-top:14px"></div>
+    <div id="snippet-box" style="display:none;margin-top:16px">
+      <div class="section-title">Client Config</div>
+      <pre id="snippet-pre" style="background:var(--panel);border:1px solid var(--border);border-radius:6px;padding:14px;font-size:11px;overflow-x:auto;white-space:pre-wrap"></pre>
+      <div style="display:flex;gap:10px;margin-top:8px;align-items:center">
+        <button class="export-btn" onclick="copySnippet()">Copy to Clipboard</button>
+        <span id="copy-msg" style="font-size:10px;color:var(--accent)"></span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Lock screen -->
+<div class="setup-overlay" id="lock-overlay">
+  <div class="setup-card">
+    <div class="setup-logo">Warden</div>
+    <div class="setup-sub">Locked - Master Password Required</div>
+    <div class="setup-field">
+      <label>Master Password</label>
+      <input id="lock-password" type="password" onkeydown="if(event.key==='Enter')doUnlock()">
+    </div>
+    <button onclick="doUnlock()">Unlock</button>
+    <div class="setup-err" id="lock-err"></div>
+  </div>
+</div>
+
 <!-- Setup overlay -->
 <div class="setup-overlay" id="setup-overlay">
   <div class="setup-card">
@@ -317,6 +356,17 @@ header { border-bottom:1px solid var(--border); padding:16px 28px; display:flex;
     <div class="setup-field">
       <label>Nebius API Key (optional - enables LLM classification)</label>
       <input id="setup-key" type="password" placeholder="Leave empty to use NEBIUS_API_KEY env var">
+    </div>
+    <div class="setup-field">
+      <label>Master Password (min 8 chars - locks this dashboard)</label>
+      <input id="setup-password" type="password" placeholder="Used to unlock Warden on launch">
+    </div>
+    <div class="setup-field">
+      <label>GitHub Identity (optional - links who runs this gateway)</label>
+      <div style="display:flex;gap:10px;align-items:center">
+        <button type="button" id="setup-oauth-btn" onclick="linkGithub()" style="width:auto;flex:0 0 auto;padding:10px 14px;background:var(--panel);border:1px solid var(--border);color:var(--text);border-radius:6px;font-family:var(--mono);font-size:11px;cursor:pointer">Link GitHub</button>
+        <span id="setup-oauth-status" style="font-size:10px;color:var(--dim)"></span>
+      </div>
     </div>
     <button onclick="saveSetup()">Save and Start Protecting</button>
     <div class="setup-err" id="setup-err"></div>
@@ -346,6 +396,7 @@ function showView(name, btn) {
   if (btn) btn.classList.add('active');
   if (name === 'audit') renderAudit();
   if (name === 'rules') renderRules();
+  if (name === 'servers') renderServers();
 }
 
 function ingestEntry(entry) {
@@ -530,12 +581,108 @@ async function saveSetup() {
   const upstream = document.getElementById('setup-upstream').value.trim();
   const key = document.getElementById('setup-key').value.trim();
   if (!upstream) { err.textContent = 'Upstream command is required.'; return; }
+  const mp = document.getElementById('setup-password').value.trim();
+  if (mp.length < 8) { err.textContent = 'Master password must be at least 8 characters.'; return; }
   try {
+    await invoke('set_master_password', { password: mp });
     await invoke('save_setup', { upstream: upstream, apiKey: key || null });
     await invoke('start_proxy');
     document.getElementById('setup-overlay').classList.remove('show');
+    window.authState = await invoke('auth_status');
+    document.getElementById('lock-btn').style.display = '';
     applyStatus();
   } catch(e) { err.textContent = String(e); }
+}
+
+let oauthPollTimer = null;
+
+async function doUnlock() {
+  const err = document.getElementById('lock-err');
+  err.textContent = '';
+  try {
+    await invoke('unlock', { password: document.getElementById('lock-password').value });
+    document.getElementById('lock-overlay').classList.remove('show');
+    document.getElementById('lock-password').value = '';
+    await loadDashboard();
+  } catch(e) { err.textContent = String(e); }
+}
+
+function lockNow() {
+  invoke('lock_app');
+  location.reload();
+}
+
+async function renderServers() {
+  try {
+    const servers = await invoke('list_servers');
+    let html = '';
+    servers.forEach((s) => {
+      html += '<div class="rule-item"><span class="rule-type path">mcp</span><span class="rule-pattern"><b>' + esc(s.name) + '</b> <span style="color:var(--dim)">' + esc(s.command) + '</span></span><button class="rule-toggle" onclick="showSnippet('' + s.name + '')">Config</button><button class="rule-del" onclick="removeServer('' + s.name + '')">&times;</button></div>';
+    });
+    document.getElementById('server-list').innerHTML = html || '<div style="color:var(--dim);padding:14px">No servers registered yet</div>';
+  } catch(e) { console.error(e); }
+}
+
+async function addServer() {
+  const name = document.getElementById('srv-name').value.trim();
+  const cmd = document.getElementById('srv-cmd').value.trim();
+  if (!name || !cmd) return;
+  try {
+    await invoke('add_server', { name: name, command: cmd });
+    document.getElementById('srv-name').value = '';
+    document.getElementById('srv-cmd').value = '';
+    renderServers();
+  } catch(e) { alert(String(e)); }
+}
+
+async function removeServer(name) {
+  try { await invoke('remove_server', { name: name }); renderServers(); }
+  catch(e) { alert(String(e)); }
+}
+
+async function showSnippet(name) {
+  try {
+    const r = await invoke('client_snippet', { name: name });
+    document.getElementById('snippet-box').style.display = 'block';
+    document.getElementById('snippet-pre').textContent = r.snippet;
+    window.currentSnippet = r.snippet;
+  } catch(e) { alert(String(e)); }
+}
+
+function copySnippet() {
+  const t = window.currentSnippet || '';
+  const msg = document.getElementById('copy-msg');
+  const done = () => { msg.textContent = 'Copied'; setTimeout(() => msg.textContent = '', 2000); };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(t).then(done).catch(() => fallbackCopy(t, done));
+  } else fallbackCopy(t, done);
+}
+function fallbackCopy(t, done) {
+  const ta = document.createElement('textarea');
+  ta.value = t; document.body.appendChild(ta); ta.select();
+  try { document.execCommand('copy'); done(); } catch(e) {}
+  document.body.removeChild(ta);
+}
+
+async function linkGithub() {
+  const status = document.getElementById('setup-oauth-status');
+  try {
+    const dc = await invoke('oauth_start');
+    status.innerHTML = 'Enter code <b style="color:var(--accent)">' + esc(dc.user_code) + '</b> at ' + esc(dc.verification_uri) + ' (browser opened)...';
+    if (oauthPollTimer) clearInterval(oauthPollTimer);
+    oauthPollTimer = setInterval(async () => {
+      try {
+        const c = await invoke('oauth_check', { deviceCode: dc.device_code });
+        if (c.linked) {
+          clearInterval(oauthPollTimer); oauthPollTimer = null;
+          status.innerHTML = 'Linked as <b style="color:var(--accent)">@' + esc(c.login) + '</b>';
+        }
+      } catch(e) {
+        clearInterval(oauthPollTimer); oauthPollTimer = null;
+        status.textContent = 'OAuth error: ' + e;
+      }
+    }, (dc.interval || 5) * 1000);
+  } catch(e) { status.textContent = String(e); }
 }
 
 function esc(s) { const d=document.createElement('div'); d.textContent=s; return d.innerHTML; }
@@ -557,6 +704,19 @@ function esc(s) { const d=document.createElement('div'); d.textContent=s; return
 
   window.invoke = invoke;
 
+  const auth = await invoke('auth_status');
+  window.authState = auth;
+  if (auth.identity) document.getElementById('info-identity').textContent = '@' + auth.identity;
+  if (auth.has_password && !auth.unlocked) {
+    document.getElementById('lock-btn').style.display = '';
+    document.getElementById('lock-overlay').classList.add('show');
+    return;
+  }
+  await loadDashboard();
+})();
+
+async function loadDashboard() {
+  document.getElementById('lock-btn').style.display = (window.authState && window.authState.has_password) ? '' : 'none';
   // Initial load: audit history + rules + status
   try {
     const audit = await invoke('get_audit_log');
@@ -577,7 +737,7 @@ function esc(s) { const d=document.createElement('div'); d.textContent=s; return
       ? 'NEBIUS_API_KEY detected: <b>LLM classification enabled</b>. You can leave the key field empty.'
       : 'No NEBIUS_API_KEY found. Without it Warden still blocks with rules, but <span class="bad">no rule match = conservative block</span>. Get a free key at <b>studio.nebius.ai</b>.';
   }
-})();
+}
 </script>
 </body>
 </html>

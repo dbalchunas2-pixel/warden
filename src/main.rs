@@ -1,3 +1,4 @@
+mod auth;
 mod classify;
 mod commands;
 mod rules;
@@ -146,6 +147,16 @@ fn main() {
             commands::get_status,
             commands::save_setup,
             commands::start_proxy,
+            commands::auth_status,
+            commands::set_master_password,
+            commands::unlock,
+            commands::lock_app,
+            commands::oauth_start,
+            commands::oauth_check,
+            commands::list_servers,
+            commands::add_server,
+            commands::remove_server,
+            commands::client_snippet,
         ])
         .setup(move |app| {
             use tauri::Emitter;

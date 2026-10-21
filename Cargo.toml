@@ -1,6 +1,6 @@
 [package]
 name = "warden"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "MCP Security Gateway with LLM-Powered Tool Call Classification"
 
@@ -21,6 +21,9 @@ regex = "1"
 chrono = { version = "0.4", features = ["serde"] }
 tauri-plugin-window-state = "2"
 tauri-plugin-notification = "2"
+argon2 = { version = "0.5", features = ["std"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+keyring = { version = "3", features = ["apple-native"] }
 
 [[bin]]
 name = "warden"
