@@ -66,7 +66,8 @@ header { border-bottom:1px solid var(--border); padding:16px 28px; display:flex;
 .section-title { font-size:10px; color:var(--dim); text-transform:uppercase; letter-spacing:2px; margin-bottom:14px; display:flex; align-items:center; gap:8px; }
 .section-title::before { content:''; width:3px; height:12px; background:var(--accent); border-radius:1px; }
 .feed { display:flex; flex-direction:column; gap:5px; }
-.entry { display:grid; grid-template-columns:64px 1fr 70px 60px; gap:10px; align-items:center; padding:9px 12px; background:var(--panel); border:1px solid var(--border); border-radius:5px; animation:slideIn 0.3s; transition:border-color 0.15s; }
+.entry { display:grid; grid-template-columns:64px minmax(0,1fr) 70px 60px; gap:10px; align-items:center; padding:9px 12px; background:var(--panel); border:1px solid var(--border); border-radius:5px; animation:slideIn 0.3s; transition:border-color 0.15s; overflow:hidden; }
+.entry > div { min-width:0; }
 .entry:hover { border-color:var(--border-hi); }
 .entry.blocked { border-left:3px solid var(--danger); }
 .entry.allowed { border-left:3px solid var(--accent); }
@@ -109,7 +110,12 @@ header { border-bottom:1px solid var(--border); padding:16px 28px; display:flex;
 .rule-add button:hover { background:var(--accent); color:var(--bg); }
 
 /* Audit table */
-.audit-table { width:100%; border-collapse:collapse; font-size:11px; }
+.audit-table { width:100%; border-collapse:collapse; font-size:11px; table-layout:fixed; }
+.audit-table th:nth-child(1), .audit-table td:nth-child(1) { width:70px; }
+.audit-table th:nth-child(2), .audit-table td:nth-child(2) { width:120px; }
+.audit-table th:nth-child(4), .audit-table td:nth-child(4) { width:80px; }
+.audit-table th:nth-child(5), .audit-table td:nth-child(5) { width:60px; }
+.audit-table td { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .audit-table th { text-align:left; padding:8px 12px; color:var(--dim); font-size:9px; text-transform:uppercase; letter-spacing:1px; border-bottom:1px solid var(--border); position:sticky; top:0; background:var(--bg); }
 .audit-table td { padding:7px 12px; border-bottom:1px solid var(--border); }
 .audit-table tr:hover { background:var(--panel); }
