@@ -228,7 +228,12 @@ impl AppState {
         Ok(())
     }
 
-    pub fn save_setup(&self, upstream: &str, api_key: Option<String>) -> Result<String> {
+    pub fn save_setup(
+        &self,
+        upstream: &str,
+        api_key: Option<String>,
+        client_id: Option<String>,
+    ) -> Result<String> {
         let target = {
             let cur = self.config_path.read().unwrap().clone();
             match cur {
@@ -248,6 +253,14 @@ impl AppState {
                 if let Some(key) = &api_key {
                     if let Some(n) = t.get_mut("nebius").and_then(|v| v.as_table_mut()) {
                         n.insert("api_key".into(), toml::Value::String(key.clone()));
+                    }
+                }
+                if let Some(cid) = &client_id {
+                    if !t.contains_key("auth") {
+                        t.insert("auth".into(), toml::Value::Table(toml::map::Map::new()));
+                    }
+                    if let Some(a) = t.get_mut("auth").and_then(|v| v.as_table_mut()) {
+                        a.insert("github_client_id".into(), toml::Value::String(cid.clone()));
                     }
                 }
             }

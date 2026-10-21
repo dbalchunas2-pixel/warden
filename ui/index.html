@@ -167,6 +167,8 @@ header { border-bottom:1px solid var(--border); padding:16px 28px; display:flex;
 .setup-card button { width:100%; padding:12px; background:var(--accent); color:var(--bg); border:none; border-radius:6px; font-family:var(--mono); font-weight:700; font-size:12px; cursor:pointer; text-transform:uppercase; letter-spacing:1px; }
 .setup-card button:hover { opacity:0.85; }
 .setup-err { color:var(--danger); font-size:11px; margin-top:10px; min-height:14px; }
+.setup-sec-title { font-size:11px; color:var(--text); text-transform:uppercase; letter-spacing:1.5px; font-weight:700; margin-bottom:8px; border-left:2px solid var(--accent); padding-left:8px; }
+.setup-code-box { margin-top:12px; padding:14px; background:var(--bg); border:1px solid var(--accent); border-radius:8px; text-align:center; }
 
 /* Empty */
 .empty { text-align:center; padding:50px 20px; color:var(--dim); }
@@ -369,6 +371,26 @@ header { border-bottom:1px solid var(--border); padding:16px 28px; display:flex;
   <div class="setup-card">
     <div class="setup-logo">Warden</div>
     <div class="setup-sub">MCP Security Gateway - First Run Setup</div>
+
+    <div class="setup-sec-title">1 &middot; Master Password</div>
+    <div class="setup-hint">Locks this dashboard on every launch. Stored as an Argon2id hash in your macOS Keychain - never written to disk.</div>
+    <div class="setup-field">
+      <label>Master Password (min 8 chars)</label>
+      <input id="setup-password" type="password" placeholder="Used to unlock Warden on launch">
+    </div>
+
+    <div class="setup-sec-title" style="margin-top:22px">2 &middot; GitHub Identity <span style="color:var(--dim);text-transform:none;letter-spacing:0">(optional)</span></div>
+    <div class="setup-hint">Your GitHub handle becomes the operator identity stamped on every audit entry - proof of <b>who</b> authorized this gateway.</div>
+    <div class="setup-field">
+      <label>GitHub OAuth Client ID (from github.com/settings/developers - Device Flow on)</label>
+      <input id="setup-cid" placeholder="e.g. Ov23li... - saved with setup so linking works forever">
+    </div>
+    <div style="display:flex;gap:10px;align-items:center">
+      <button type="button" id="setup-oauth-btn" onclick="linkGithub()" style="width:auto;flex:0 0 auto;padding:10px 14px;background:var(--panel);border:1px solid var(--border);color:var(--text);border-radius:6px;font-family:var(--mono);font-size:11px;cursor:pointer">Link GitHub</button>
+      <span id="setup-oauth-status" style="font-size:10px;color:var(--dim)"></span>
+    </div>
+
+    <div class="setup-sec-title" style="margin-top:22px">3 &middot; Gateway</div>
     <div class="setup-hint" id="setup-api-hint">Checking for NEBIUS_API_KEY...</div>
     <div class="setup-field">
       <label>Upstream MCP Server Command</label>
@@ -378,17 +400,7 @@ header { border-bottom:1px solid var(--border); padding:16px 28px; display:flex;
       <label>Nebius API Key (optional - enables LLM classification)</label>
       <input id="setup-key" type="password" placeholder="Leave empty to use NEBIUS_API_KEY env var">
     </div>
-    <div class="setup-field">
-      <label>Master Password (min 8 chars - locks this dashboard)</label>
-      <input id="setup-password" type="password" placeholder="Used to unlock Warden on launch">
-    </div>
-    <div class="setup-field">
-      <label>GitHub Identity (optional - links who runs this gateway)</label>
-      <div style="display:flex;gap:10px;align-items:center">
-        <button type="button" id="setup-oauth-btn" onclick="linkGithub()" style="width:auto;flex:0 0 auto;padding:10px 14px;background:var(--panel);border:1px solid var(--border);color:var(--text);border-radius:6px;font-family:var(--mono);font-size:11px;cursor:pointer">Link GitHub</button>
-        <span id="setup-oauth-status" style="font-size:10px;color:var(--dim)"></span>
-      </div>
-    </div>
+
     <button onclick="saveSetup()">Save and Start Protecting</button>
     <div class="setup-err" id="setup-err"></div>
   </div>
@@ -606,7 +618,8 @@ async function saveSetup() {
   if (mp.length < 8) { err.textContent = 'Master password must be at least 8 characters.'; return; }
   try {
     await invoke('set_master_password', { password: mp });
-    await invoke('save_setup', { upstream: upstream, apiKey: key || null });
+    const cid = document.getElementById('setup-cid').value.trim();
+    await invoke('save_setup', { upstream: upstream, apiKey: key || null, clientId: cid || null });
     await invoke('start_proxy');
     document.getElementById('setup-overlay').classList.remove('show');
     window.authState = await invoke('auth_status');
@@ -689,25 +702,52 @@ function fallbackCopy(t, done) {
 
 async function linkGithub(targetId) {
   const status = document.getElementById(targetId || 'setup-oauth-status');
+  const cidEl = document.getElementById('setup-cid');
+  const cid = (!targetId && cidEl && cidEl.value.trim()) ? cidEl.value.trim() : null;
+  const startArg = cid ? { clientId: cid } : {};
+  const pollArg = cid ? { clientId: cid } : {};
   try {
-    const dc = await invoke('oauth_start');
-    status.innerHTML = 'Enter code <b style="color:var(--accent)">' + esc(dc.user_code) + '</b> at ' + esc(dc.verification_uri) + ' (browser opened)...';
+    const dc = await invoke('oauth_start', startArg);
+    let box = document.getElementById('oauth-code-box');
+    if (!box) {
+      box = document.createElement('div');
+      box.id = 'oauth-code-box';
+      box.className = 'setup-code-box';
+      box.innerHTML = '<div style="font-size:10px;color:var(--dim);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px">Enter this code at ' + esc(dc.verification_uri) + '</div>'
+        + '<div id="oauth-code" style="font-family:var(--mono);font-size:26px;font-weight:700;color:var(--accent);letter-spacing:5px;margin-bottom:10px"></div>'
+        + '<button type="button" id="oauth-copy-btn" style="width:auto;padding:6px 14px;background:var(--panel);border:1px solid var(--border);color:var(--text);border-radius:6px;font-family:var(--mono);font-size:10px;cursor:pointer;text-transform:uppercase" onclick="copyOauthCode()">Copy code</button>'
+        + '<div style="font-size:10px;color:var(--dim);margin-top:8px;line-height:1.5">GitHub should open in your browser automatically.<br>If it stays behind other windows, bring it forward or visit the link above.</div>';
+      status.parentNode.insertBefore(box, status.nextSibling);
+    }
+    document.getElementById('oauth-code').textContent = dc.user_code;
+    box.style.display = '';
+    status.innerHTML = 'Waiting for authorization...';
     if (oauthPollTimer) clearInterval(oauthPollTimer);
     oauthPollTimer = setInterval(async () => {
       try {
-        const c = await invoke('oauth_check', { deviceCode: dc.device_code });
+        const c = await invoke('oauth_check', Object.assign({ deviceCode: dc.device_code }, pollArg));
         if (c.linked) {
           clearInterval(oauthPollTimer); oauthPollTimer = null;
+          box.style.display = 'none';
           status.innerHTML = 'Linked as <b style="color:var(--accent)">@' + esc(c.login) + '</b>';
+          window.authState = await invoke('auth_status');
+          updateSecurityPanel(window.authState);
         }
       } catch(e) {
         clearInterval(oauthPollTimer); oauthPollTimer = null;
+        box.style.display = 'none';
         status.textContent = 'OAuth error: ' + e;
       }
     }, (dc.interval || 5) * 1000);
   } catch(e) { status.textContent = String(e); }
 }
 
+function copyOauthCode() {
+  navigator.clipboard.writeText(document.getElementById('oauth-code').textContent);
+  const b = document.getElementById('oauth-copy-btn');
+  b.textContent = 'Copied';
+  setTimeout(() => { b.textContent = 'Copy code'; }, 1500);
+}
 async function setPw() {
   const msg = document.getElementById('sec-msg');
   const pw = document.getElementById('sec-pw').value;

@@ -251,13 +251,18 @@ pub fn save_setup(
     state: State<'_, Arc<AppState>>,
     upstream: String,
     api_key: Option<String>,
+    client_id: Option<String>,
 ) -> Result<Value, String> {
     gate(&state)?;
     if upstream.trim().is_empty() {
         return Err("Upstream command is empty".into());
     }
     state
-        .save_setup(upstream.trim(), api_key.filter(|k| !k.trim().is_empty()))
+        .save_setup(
+            upstream.trim(),
+            api_key.filter(|k| !k.trim().is_empty()),
+            client_id.filter(|k| !k.trim().is_empty()),
+        )
         .map(|path| json!({"ok": true, "path": path}))
         .map_err(|e| e.to_string())
 }
@@ -350,10 +355,17 @@ fn oauth_client_id(state: &Arc<AppState>) -> Option<String> {
 }
 
 #[tauri::command]
-pub async fn oauth_start(state: State<'_, Arc<AppState>>) -> Result<Value, String> {
-    let cid = oauth_client_id(&state).ok_or_else(|| {
-        "GitHub OAuth not configured. Set WARDEN_GITHUB_CLIENT_ID or [auth] github_client_id in warden.toml.".to_string()
-    })?;
+pub async fn oauth_start(
+    state: State<'_, Arc<AppState>>,
+    client_id: Option<String>,
+) -> Result<Value, String> {
+    let cid = client_id
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| oauth_client_id(&state))
+        .ok_or_else(|| {
+            "GitHub OAuth not configured. Paste your OAuth Client ID in setup, or set WARDEN_GITHUB_CLIENT_ID / [auth] github_client_id in warden.toml.".to_string()
+        })?;
     let dc = crate::auth::device_start(&cid).await.map_err(|e| format!("{:#}", e))?;
     let _ = std::process::Command::new("open").arg(&dc.verification_uri).spawn();
     Ok(json!({
@@ -365,7 +377,16 @@ pub async fn oauth_start(state: State<'_, Arc<AppState>>) -> Result<Value, Strin
 }
 
 #[tauri::command]
-pub async fn oauth_check(state: State<'_, Arc<AppState>>, device_code: String) -> Result<Value, String> {
+pub async fn oauth_check(
+    state: State<'_, Arc<AppState>>,
+    device_code: String,
+    client_id: Option<String>,
+) -> Result<Value, String> {
+    let cid = client_id
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| oauth_client_id(&state))
+        .ok_or_else(|| "GitHub OAuth not configured".to_string())?;
     let cid = oauth_client_id(&state)
         .ok_or_else(|| "GitHub OAuth not configured".to_string())?;
     match crate::auth::device_poll(&cid, &device_code).await.map_err(|e| format!("{:#}", e))? {
