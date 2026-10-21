@@ -397,7 +397,7 @@ header { border-bottom:1px solid var(--border); padding:16px 28px; display:flex;
     <div class="setup-sec-title" style="margin-top:22px">2 &middot; GitHub Identity <span style="color:var(--dim);text-transform:none;letter-spacing:0">(optional)</span></div>
     <div class="setup-hint">Your GitHub handle becomes the operator identity stamped on every audit entry - proof of <b>who</b> authorized this gateway.</div>
     <div class="setup-field">
-      <label>GitHub OAuth Client ID (from github.com/settings/developers - Device Flow on)</label>
+      <label>GitHub OAuth Client ID <span style="color:var(--dim)">(pre-configured - just click Link GitHub)</span></label>
       <input id="setup-cid" placeholder="e.g. Ov23li... - saved with setup so linking works forever">
     </div>
     <div style="display:flex;gap:10px;align-items:center">
@@ -623,6 +623,10 @@ async function applyStatus() {
       document.getElementById('info-budget').textContent = appStatus.llm_bucket_tokens + ' / ' + appStatus.llm_bucket_burst + ' tokens (refill ' + appStatus.llm_bucket_refill + '/s, fail-closed)';
     }
     document.getElementById('info-timeout').textContent = (appStatus.llm_timeout_secs || 20) + 's (fail-closed)';
+    if (appStatus.github_client_id) {
+      const cidField = document.getElementById('setup-cid');
+      if (cidField && !cidField.value) cidField.value = appStatus.github_client_id;
+    }
     return appStatus;
   } catch(e) { console.error(e); return null; }
 }

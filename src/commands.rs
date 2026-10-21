@@ -241,7 +241,8 @@ pub fn get_status(state: State<'_, Arc<AppState>>) -> Value {
         "llm_bucket_tokens": (bucket_tokens * 10.0).round() / 10.0,
         "llm_bucket_burst": bucket_burst,
         "llm_bucket_refill": bucket_refill,
-        "llm_timeout_secs": 20
+        "llm_timeout_secs": 20,
+        "github_client_id": oauth_client_id(&state)
     })
 }
 

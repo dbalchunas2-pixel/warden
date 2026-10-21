@@ -46,6 +46,9 @@ cmd_block_patterns = [
 
 [audit]
 log_path = "./warden-audit.jsonl"
+
+[auth]
+github_client_id = "Ov23ct40UXi2yfU05UYx"
 "##;
 
 fn parse_args() -> (Option<String>, Option<String>) {
