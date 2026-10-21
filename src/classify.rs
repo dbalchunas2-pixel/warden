@@ -2,7 +2,6 @@ use anyhow::{Context, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::env;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Classification {
@@ -34,9 +33,7 @@ Respond ONLY with a JSON object, no markdown, no explanation outside the JSON:
 {"verdict": "allow" | "block", "confidence": <0.0-1.0>, "reasoning": "<one sentence>", "category": "safe" | "data_exfiltration" | "destructive" | "credential_access" | "privilege_escalation" | "prompt_injection" | "other"}"#;
 
 /// Sends a tool-call description to the Nebius Nemotron model and parses the response.
-pub async fn classify_tool_call(method: &str, params: &Value) -> Result<Classification> {
-    let api_key = env::var("NEBIUS_API_KEY")
-        .map_err(|_| anyhow::anyhow!("NEBIUS_API_KEY not set in environment"))?;
+pub async fn classify_tool_call(method: &str, params: &Value, api_key: &str) -> Result<Classification> {
 
     // Truncate large argument blobs to 4 KB to stay within token limits.
     let mut args_str = serde_json::to_string(params).unwrap_or_default();

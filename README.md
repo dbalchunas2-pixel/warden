@@ -2,30 +2,39 @@
 
 MCP Security Gateway - LLM-powered tool call classification on Nebius Token Factory with NVIDIA Nemotron.
 
-Warden sits between your MCP client (Claude Desktop, Cursor, etc.) and your MCP server, intercepting every `tools/call` through a layered defense pipeline:
+Warden is a **native Mac app** (Tauri) that sits between your MCP client (Claude Desktop, Cursor, etc.) and your MCP server, intercepting every `tools/call` through a layered defense pipeline:
 
 1. **Deterministic rules** - regex patterns for known attack vectors (credential paths, destructive commands, data exfiltration). Instant, zero latency.
 2. **LLM classification** - NVIDIA Nemotron on Nebius Token Factory analyzes ambiguous calls the rules don't cover.
 3. **Audit logging** - every decision recorded to JSONL with timestamp, method, params, verdict, and reason.
 
+The stdio proxy and the dashboard are **one application**: the proxy inspects JSON-RPC on stdin/stdout while the native window shows what it's doing in real time over Tauri IPC events.
+
 ## Install
+
+One command - no frontend build step, no Node required:
 
 ```bash
 cargo install --git https://github.com/dbalchunas2-pixel/warden
 ```
 
+Or download `Warden_0.2.0_aarch64.dmg` from a release and drag **Warden.app** to Applications.
+
 ## Quick Start
 
 ```bash
-# First run - guided setup (generates warden.toml, checks API key)
+# First run - opens the Warden window with a setup screen
+# (set your upstream MCP server; optionally paste a Nebius API key)
 warden
 
-# Start protecting an MCP server
+# Start protecting an MCP server (proxy + live dashboard in one app)
 warden --upstream "node /path/to/mcp-server.js"
 
 # Or use a config file
 warden --config warden.toml
 ```
+
+When your MCP client spawns `warden --upstream ...`, the proxy reads the client's requests from stdin and the Warden window opens as the control plane.
 
 ## Nebius API Key
 
@@ -40,7 +49,9 @@ echo 'export NEBIUS_API_KEY="your-key"' >> ~/.zshrc
 source ~/.zshrc
 ```
 
-Without the API key, the rule engine still blocks known attacks. LLM classification is only used for calls that don't match any rule.
+GUI-launched apps don't inherit shell env vars, so the setup screen also accepts a key directly - it is stored in `warden.toml` under `[nebius] api_key`. Env var wins if both are present.
+
+Without any key, the rule engine still blocks known attacks; unmatched calls are **blocked conservatively**.
 
 ## MCP Client Configuration
 
@@ -72,14 +83,16 @@ Or with a config file:
 
 ## Dashboard
 
-Warden runs a live dashboard at `http://127.0.0.1:31337` with:
+The native Warden window has four views:
 
 - **Overview** - live tool call feed, stats (total/allowed/blocked/rate), threat category breakdown, block rate sparkline
 - **Audit Log** - searchable, filterable table of all decisions
-- **Rules** - view active rule patterns, delete rules
-- **Tester** - run test scenarios through the full security pipeline
+- **Rules** - view, add, and delete regex rules at runtime (takes effect immediately, no restart)
+- **Tester** - run any tool call (method + JSON args) through the full pipeline: rules first, then Nemotron LLM classification
 
 ## Configuration
+
+Warden looks for a config at `--config <path>`, then `./warden.toml`, then `~/Library/Application Support/Warden/warden.toml`.
 
 ```toml
 upstream_command = "node /path/to/mcp-server.js"
@@ -88,6 +101,7 @@ upstream_command = "node /path/to/mcp-server.js"
 model = "nvidia/Nemotron-3_5-Lightning"
 base_url = "https://api.tokenfactory.nebius.com/v1/"
 confidence_threshold = 0.7
+# api_key = "..."  # optional, for GUI launches without shell env
 
 [rules]
 block_tools = []
@@ -95,12 +109,13 @@ allow_tools = ["tools/list", "initialize", "notifications/initialized"]
 path_block_patterns = [
   "/etc/.*",
   "~/.ssh/.*",
-  ".*\.env$",
-  ".*/\.aws/credentials",
+  ".*\\.ssh/.*",
+  ".*\\.env$",
+  ".*/\\.aws/credentials",
 ]
 cmd_block_patterns = [
   "rm .*-rf .*/",
-  "curl.*\|.*sh",
+  "curl.*\\|.*sh",
   "dd of=",
   "chmod 777",
   "mkfs",
@@ -117,36 +132,39 @@ log_path = "./warden-audit.jsonl"
 ```
 MCP Client (Claude, Cursor)
         |
-      stdin | stdout
+   stdin | stdout
         v   ^
-    Warden (Rust binary)
-    - Rule engine: regex patterns block known attacks instantly
-    - LLM classifier: Nemotron analyzes ambiguous calls
-    - Audit log: JSONL with full decision context
-    - Dashboard: Axum server with SSE live events
+    Warden (single Tauri app)
+    +- stdio proxy: JSON-RPC in, inspected JSON-RPC out
+    +- rule engine: regex patterns block known attacks instantly
+    +- LLM classifier: Nemotron analyzes ambiguous calls
+    +- audit log: JSONL with full decision context
+    +- native window: control plane, receives live Tauri events
         |
-      stdin | stdout
+   stdin | stdout
         v   ^
     MCP Server (your actual server)
 ```
 
 ## Architecture
 
-Single Rust binary. No separate frontend, no external services.
+Single Rust binary and single `.app` bundle. No separate frontend build, no external services, no localhost HTTP server.
 
-- **Proxy** - reads JSON-RPC from stdin, forwards to upstream process via stdin/stdout
-- **Rule engine** - regex-based pattern matching on tool names, paths, and commands
-- **LLM classifier** - sends tool call to Nemotron via Nebius Token Factory API, parses JSON verdict
-- **Dashboard** - Axum web server with embedded HTML, SSE for live events, REST API for audit/rules/test
-- **Audit log** - JSONL file, one line per decision
+- **Proxy** (`src/state.rs`) - reads JSON-RPC from stdin, forwards to the upstream process spawned by Warden, emits `tool-call-event` / `proxy-status` Tauri events for every decision
+- **Rule engine** (`src/rules.rs`) - regex-based pattern matching on tool names, paths, and commands; hot-reloadable at runtime
+- **LLM classifier** (`src/classify.rs`) - sends tool call to Nemotron via the Nebius Token Factory API, parses the JSON verdict, threshold 0.7
+- **Commands** (`src/commands.rs`) - Tauri IPC commands (`get_audit_log`, `get_rules`, `add_rule`, `delete_rule`, `test_tool_call`, `get_stats`, `get_status`, `save_setup`, `start_proxy`) replace the old REST API
+- **Frontend** (`ui/index.html`) - plain HTML/JS SPA embedded into the binary at compile time, calls `invoke()` and listens to proxy events
+
+Tracing goes to stderr only - stdout carries MCP JSON-RPC, nothing else.
 
 ## Building from Source
 
 ```bash
 git clone https://github.com/dbalchunas2-pixel/warden.git
 cd warden
-cargo build --release
-./target/release/warden
+cargo build --release                      # binary at target/release/warden
+npx @tauri-apps/cli@2 build                # Warden.app + dmg installer
 ```
 
 ## License
