@@ -1,4 +1,6 @@
 mod auth;
+
+use tauri::Manager;
 mod classify;
 mod commands;
 mod rules;
@@ -136,6 +138,13 @@ fn main() {
 
     tauri::Builder::default()
         .manage(state.clone())
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            for (_, w) in app.webview_windows() {
+                let _ = w.show();
+                let _ = w.unminimize();
+                let _ = w.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_notification::init())
         .invoke_handler(tauri::generate_handler![

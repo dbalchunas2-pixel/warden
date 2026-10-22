@@ -45,12 +45,29 @@ impl AppState {
             .and_then(|c| c.as_float())
             .unwrap_or(0.7);
 
-        let audit_path = config
-            .get("audit")
-            .and_then(|a| a.get("log_path"))
-            .and_then(|p| p.as_str())
-            .unwrap_or("./warden-audit.jsonl")
-            .to_string();
+        let audit_path = {
+            let raw = config
+                .get("audit")
+                .and_then(|a| a.get("log_path"))
+                .and_then(|p| p.as_str())
+                .unwrap_or("warden-audit.jsonl");
+            let p = std::path::Path::new(raw);
+            if p.is_absolute() {
+                raw.to_string()
+            } else {
+                // Resolve relative to config file dir, or App Support if no config path
+                let base = config_path
+                    .as_ref()
+                    .and_then(|p| p.parent())
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or_else(|| {
+                        std::env::var_os("HOME")
+                            .map(|h| std::path::PathBuf::from(h).join("Library/Application Support/Warden"))
+                            .unwrap_or_else(|| std::path::PathBuf::from("."))
+                    });
+                base.join(raw).to_string_lossy().to_string()
+            }
+        };
 
         let upstream = config
             .get("upstream_command")
@@ -63,7 +80,16 @@ impl AppState {
             .and_then(|n| n.get("api_key"))
             .and_then(|k| k.as_str())
             .map(|s| s.to_string())
-            .filter(|s| !s.trim().is_empty());
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| {
+                // Also support api_key_env: look up the named env var at launch
+                config
+                    .get("nebius")
+                    .and_then(|n| n.get("api_key_env"))
+                    .and_then(|k| k.as_str())
+                    .and_then(|env_name| std::env::var(env_name).ok())
+                    .filter(|s| !s.trim().is_empty())
+            });
 
         let st = Self {
             entries: Mutex::new(VecDeque::with_capacity(1000)),

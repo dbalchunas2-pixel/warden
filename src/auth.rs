@@ -1,31 +1,69 @@
 //! Local authentication for the Warden dashboard.
-//! - Master password: Argon2id hash stored in the macOS Keychain.
-//! - Optional GitHub identity via OAuth device flow (token + login in Keychain).
+//! - Master password: Argon2id hash stored in a local credentials file.
+//! - Optional GitHub identity via OAuth device flow (token + login in same file).
+//! No macOS Keychain — no permission prompts, no code-signing issues.
 
 use anyhow::{anyhow, bail, Result};
 use argon2::password_hash::{PasswordHash, PasswordHasher, SaltString};
 use rand_core::OsRng;
 use argon2::{Argon2, PasswordVerifier};
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::Duration;
 use tracing::info;
 
-const SERVICE: &str = "warden-security-gateway";
 const KEY_PASSWORD: &str = "master-password-hash";
 const KEY_GITHUB_TOKEN: &str = "github-token";
 const KEY_GITHUB_LOGIN: &str = "github-login";
 
-fn entry(key: &str) -> Result<keyring::Entry> {
-    keyring::Entry::new(SERVICE, key).map_err(|e| anyhow!("Keychain unavailable: {}", e))
+/// Credentials file: ~/Library/Application Support/Warden/credentials.json
+fn creds_path() -> PathBuf {
+    let home = std::env::var_os("HOME").unwrap_or_default();
+    let dir = PathBuf::from(home).join("Library/Application Support/Warden");
+    let _ = std::fs::create_dir_all(&dir);
+    dir.join("credentials.json")
+}
+
+/// Load all credentials from the JSON file.
+fn load_all() -> HashMap<String, String> {
+    let path = creds_path();
+    match std::fs::read_to_string(&path) {
+        Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
+        Err(_) => HashMap::new(),
+    }
+}
+
+/// Save all credentials to the JSON file with 0600 permissions.
+fn save_all(map: &HashMap<String, String>) -> Result<()> {
+    let path = creds_path();
+    let json = serde_json::to_string_pretty(map)
+        .map_err(|e| anyhow!("Serialize credentials: {}", e))?;
+    std::fs::write(&path, &json)
+        .map_err(|e| anyhow!("Write credentials file: {}", e))?;
+    // Restrict to owner-only (0600)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| anyhow!("Set permissions: {}", e))?;
+    }
+    Ok(())
 }
 
 pub fn store_secret(key: &str, val: &str) -> Result<()> {
-    entry(key)?
-        .set_password(val)
-        .map_err(|e| anyhow!("Keychain write failed: {}", e))
+    let mut map = load_all();
+    map.insert(key.to_string(), val.to_string());
+    save_all(&map)
 }
 
 pub fn load_secret(key: &str) -> Option<String> {
-    entry(key).ok()?.get_password().ok()
+    load_all().get(key).cloned()
+}
+
+pub fn delete_secret(key: &str) {
+    let mut map = load_all();
+    map.remove(key);
+    let _ = save_all(&map);
 }
 
 pub fn has_master_password() -> bool {
@@ -43,7 +81,7 @@ pub fn set_master_password(pw: &str) -> Result<()> {
         .map_err(|e| anyhow!("Hashing failed: {}", e))?
         .to_string();
     store_secret(KEY_PASSWORD, &hash)?;
-    info!("Master password set (Argon2id, Keychain)");
+    info!("Master password set (Argon2id, file-based)");
     Ok(())
 }
 
