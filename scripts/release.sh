@@ -20,15 +20,11 @@ npx @tauri-apps/cli@2 build
 # Bundler strips _CodeSignature: re-sign the app, then rebuild tar.gz from the SIGNED app and sign THAT.
 codesign --force --deep --sign - target/release/bundle/macos/Warden.app
 codesign -v --strict target/release/bundle/macos/Warden.app
-cd target/release/bundle/macos
-rm -f Warden.app.tar.gz Warden.app.tar.gz.sig
-tar -czf Warden.app.tar.gz Warden.app
-npx --yes @tauri-apps/cli@2 signer sign -k "$TAURI_SIGNING_PRIVATE_KEY" --password "" Warden.app.tar.gz
-cd ../../..
+(cd target/release/bundle/macos && rm -f Warden.app.tar.gz Warden.app.tar.gz.sig && tar -czf Warden.app.tar.gz Warden.app && npx --yes @tauri-apps/cli@2 signer sign -k "$TAURI_SIGNING_PRIVATE_KEY" --password "" Warden.app.tar.gz)
 
 TARGZ=target/release/bundle/macos/Warden.app.tar.gz
 SIG=target/release/bundle/macos/Warden.app.tar.gz.sig
-DMG=$(ls target/release/bundle/dmg/*.dmg | head -1)
+DMG=$(ls "$(pwd)/target/release/bundle/dmg/"*.dmg | head -1)
 
 git add -A && git commit -m "release v$VER" && git tag "v$VER" && git push origin main --tags
 
