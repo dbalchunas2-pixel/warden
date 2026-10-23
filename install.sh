@@ -38,6 +38,7 @@ if [ -d "$APP_PATH" ]; then
     rm -rf "$APP_PATH"
 fi
 
+codesign --force --deep --sign - target/release/bundle/macos/Warden.app 2>/dev/null || true
 echo "Installing to /Applications..."
 cp -R target/release/bundle/macos/Warden.app "$APP_PATH"
 
