@@ -13,11 +13,20 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command as TokioCommand;
 use tracing::{error, info, warn};
 
+#[derive(Clone, serde::Serialize, serde::Deserialize, Default)]
+pub struct CumulativeStats {
+    pub total_calls: u64,
+    pub total_allowed: u64,
+    pub total_blocked: u64,
+    pub posture_history: Vec<Value>,
+}
+
 pub struct AppState {
     pub entries: Mutex<VecDeque<Value>>,
     pub engine: SharedEngine,
     pub confidence_threshold: f64,
     pub audit_path: String,
+    pub state_path: String,
     pub last_call_ms: AtomicU64,
     pub last_notify: Mutex<std::time::Instant>,
     pub llm_bucket: Mutex<TokenBucket>,
@@ -30,6 +39,8 @@ pub struct AppState {
     pub proxy_status: RwLock<String>,
     pub proxy_running: AtomicBool,
     pub unlocked: AtomicBool,
+    pub baseline: Mutex<HashMap<String, (u64, String)>>,
+    pub cum_stats: Mutex<CumulativeStats>,
 }
 
 impl AppState {
@@ -91,11 +102,26 @@ impl AppState {
                     .filter(|s| !s.trim().is_empty())
             });
 
+        let state_path = {
+            let sp = config_path
+                .as_ref()
+                .and_then(|p| p.parent())
+                .map(|p| p.join("warden-state.json"))
+                .unwrap_or_else(|| {
+                    std::env::var_os("HOME")
+                        .map(|h| std::path::PathBuf::from(h).join("Library/Application Support/Warden/warden-state.json"))
+                        .unwrap_or_else(|| std::path::PathBuf::from("warden-state.json"))
+                });
+            sp.to_string_lossy().to_string()
+        };
+        let (baseline, cum_stats) = load_persistent_state(&state_path);
+
         let st = Self {
             entries: Mutex::new(VecDeque::with_capacity(1000)),
             engine,
             confidence_threshold,
             audit_path,
+            state_path,
             config: RwLock::new(config.clone()),
             config_path: RwLock::new(config_path),
             api_key_config: RwLock::new(api_key),
@@ -108,8 +134,19 @@ impl AppState {
             proxy_status: RwLock::new("idle".into()),
             proxy_running: AtomicBool::new(false),
             unlocked: AtomicBool::new(false),
+            baseline: Mutex::new(baseline),
+            cum_stats: Mutex::new(cum_stats),
         };
         st.load_audit_history();
+        {
+            let entries = st.entries.lock().unwrap();
+            let mut cs = st.cum_stats.lock().unwrap();
+            for e in entries.iter() {
+                cs.total_calls += 1;
+                if e.get("verdict").and_then(|v| v.as_str()) == Some("allowed") { cs.total_allowed += 1; }
+                if e.get("verdict").and_then(|v| v.as_str()) == Some("blocked") { cs.total_blocked += 1; }
+            }
+        }
         Ok(st)
     }
 
@@ -229,6 +266,37 @@ impl AppState {
             entries.push_back(entry.clone());
         }
         self.emit("tool-call-event", &entry);
+        {
+            let mut bl = self.baseline.lock().unwrap();
+            let ec = bl.entry(method.to_string()).or_insert((0, chrono::Utc::now().to_rfc3339()));
+            ec.0 += 1;
+        }
+        {
+            let mut cs = self.cum_stats.lock().unwrap();
+            cs.total_calls += 1;
+            if verdict == "allowed" { cs.total_allowed += 1; }
+            if verdict == "blocked" { cs.total_blocked += 1; }
+            if cs.total_calls % 10 == 0 {
+                save_persistent_state(&self.state_path, &self.baseline.lock().unwrap(), &cs);
+            }
+        }
+    }
+
+    pub fn check_anomaly(&self, method: &str) -> Option<String> {
+        let bl = self.baseline.lock().unwrap();
+        if !bl.contains_key(method) {
+            return Some(format!("Anomaly: '{}' has never been called in baseline", method));
+        }
+        if let Some((count, _)) = bl.get(method) {
+            if *count <= 1 && method.starts_with("tools/") {
+                return Some(format!("Anomaly: '{}' rarely called (count={})", method, count));
+            }
+        }
+        None
+    }
+
+    pub fn save_state(&self) {
+        save_persistent_state(&self.state_path, &self.baseline.lock().unwrap(), &self.cum_stats.lock().unwrap());
     }
 
     pub fn start_proxy(self: &Arc<Self>, cmd: &str) -> Result<()> {
@@ -299,6 +367,32 @@ impl AppState {
         }
         Ok(target.display().to_string())
     }
+}
+
+fn load_persistent_state(path: &str) -> (HashMap<String, (u64, String)>, CumulativeStats) {
+    match std::fs::read_to_string(path) {
+        Ok(content) => {
+            let v: Value = serde_json::from_str(&content).unwrap_or(Value::Null);
+            let baseline = v.get("baseline")
+                .and_then(|b| b.as_object())
+                .map(|obj| obj.iter().filter_map(|(k, v)| {
+                    let count = v.get("count").and_then(|c| c.as_u64()).unwrap_or(0);
+                    let first_seen = v.get("first_seen").and_then(|f| f.as_str()).unwrap_or("").to_string();
+                    Some((k.clone(), (count, first_seen)))
+                }).collect())
+                .unwrap_or_default();
+            let cum = v.get("cumulative").cloned().unwrap_or(Value::Null);
+            let cum_stats: CumulativeStats = if cum.is_null() { CumulativeStats::default() } else { serde_json::from_value(cum).unwrap_or_default() };
+            (baseline, cum_stats)
+        }
+        Err(_) => (HashMap::new(), CumulativeStats::default())
+    }
+}
+
+fn save_persistent_state(path: &str, baseline: &HashMap<String, (u64, String)>, cum: &CumulativeStats) {
+    let bl_json: serde_json::Map<String, Value> = baseline.iter().map(|(k, (count, first_seen))| (k.clone(), json!({"count": count, "first_seen": first_seen}))).collect();
+    let state = json!({"baseline": Value::Object(bl_json), "cumulative": cum, "saved_at": chrono::Utc::now().to_rfc3339()});
+    let _ = std::fs::write(path, serde_json::to_string_pretty(&state).unwrap_or_default());
 }
 
 /// Token bucket guarding the LLM classification budget.

@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Classification {
@@ -301,4 +301,89 @@ for the operator. Highlight: total calls, block rate, most common threats blocke
 any patterns of concern, and overall security posture. Keep it to one paragraph. No markdown.";
     let user = format!("Summarize this audit log:\n\n{}", log_str);
     call_nemotron(system, &user, api_key).await
+}
+
+
+// ─── Feature 5: MCP Auto-Discovery ─────────────────────────────────────────
+/// Classify a discovered filesystem candidate: is it an MCP server? What risk level?
+pub async fn classify_server_candidate(name: &str, command: &str, files: &[String], api_key: &str) -> Result<Value> {
+    let files_str = files.iter().take(20).cloned().collect::<Vec<_>>().join(", ");
+    let system = r#"You are Warden, an MCP (Model Context Protocol) server discovery agent.
+
+You are given a directory name, a launch command, and a list of files found in the directory.
+Determine:
+1. Is this actually an MCP stdio server? (not an HTTP server, CLI tool, or web app)
+2. What is the correct stdio launch command? (fix env vars, flags)
+3. What tool categories does it expose? (file_access, network, shell, browser, calendar, etc.)
+4. What risk level? (low, medium, high)
+5. Suggested Warden security rules for this server
+
+Respond ONLY with JSON, no markdown:
+{"is_mcp": true|false, "launch_command": "<corrected command>", "tool_categories": ["file_access","network"], "risk_level": "low"|"medium"|"high", "description": "<one sentence what this server does>", "suggested_rules": [{"type":"path|cmd","pattern":"<regex>"}]}
+"#;
+    let user = format!(
+        "Analyze this candidate MCP server:\n\nName: {}\nCommand: {}\nFiles in directory: {}\n\nIs this an MCP stdio server? Respond with JSON only.",
+        name, command, files_str
+    );
+    let content = call_nemotron(system, &user, api_key).await?;
+    let json_str = extract_json(&content);
+    let parsed: Value = serde_json::from_str(&json_str)
+        .with_context(|| format!("Failed to parse server classification from: {}", content))?;
+    Ok(parsed)
+}
+
+// ─── Feature 8: Security Posture Assessment ──────────────────────────────
+/// Assess overall security posture. Deterministic (no LLM needed).
+pub fn assess_posture(rules: usize, llm_enabled: bool, blocked: usize, total: usize, has_password: bool) -> Value {
+    let mut score = 0;
+
+    // Rule coverage (0-40 points)
+    score += (rules as f64 / 20.0 * 40.0).min(40.0) as u64;
+
+    // LLM enabled (0-25 points)
+    if llm_enabled { score += 25; }
+
+    // Password protection (0-15 points)
+    if has_password { score += 15; }
+
+    // Block rate sanity (0-20 points): 100% block = everything caught, but
+    // a reasonable block rate (10-80%) shows the system is selective
+    let block_rate = if total > 0 { blocked as f64 / total as f64 * 100.0 } else { 0.0 };
+    if total == 0 {
+        score += 10; // neutral - no traffic yet
+    } else if block_rate >= 10.0 && block_rate <= 80.0 {
+        score += 20; // healthy selective blocking
+    } else if block_rate > 80.0 {
+        score += 10; // over-blocking, rules may need tuning
+    } else {
+        score += 5; // under-blocking, might need more rules
+    }
+
+    let grade = match score {
+        90..=100 => "A",
+        80..=89 => "B",
+        70..=79 => "C",
+        60..=69 => "D",
+        _ => "F",
+    };
+
+    let gaps = {
+        let mut g = Vec::new();
+        if rules < 5 { g.push("Few active rules - add path and command patterns for common threats"); }
+        if !llm_enabled { g.push("LLM classification disabled - unmatched calls are conservatively blocked but you lose intelligent analysis"); }
+        if !has_password { g.push("No master password - dashboard is not locked"); }
+        if total > 0 && block_rate < 5.0 { g.push("Very low block rate - consider adding more restrictive rules"); }
+        if g.is_empty() { g.push("No major gaps detected"); }
+        g
+    };
+
+    json!({
+        "score": score,
+        "grade": grade,
+        "block_rate": (block_rate * 10.0).round() / 10.0,
+        "gaps": gaps,
+        "rules": rules,
+        "llm_enabled": llm_enabled,
+        "has_password": has_password
+    })
 }

@@ -173,6 +173,14 @@ fn main() {
             commands::synthesize_rule,
             commands::review_tools,
             commands::summarize_audit,
+            commands::run_attack_simulation,
+            commands::discover_servers,
+            commands::get_baseline,
+            commands::check_anomaly_cmd,
+            commands::run_comparative,
+            commands::get_posture_score,
+            commands::export_policy,
+            commands::import_policy,
         ])
         .setup(move |app| {
             use tauri::Emitter;
