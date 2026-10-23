@@ -702,6 +702,7 @@ pub async fn run_attack_simulation(
 #[tauri::command]
 pub async fn discover_servers(state: State<'_, Arc<AppState>>) -> Result<Value, String> {
     gate(&state)?;
+    let state: Arc<AppState> = state.inner().clone();
     let home = std::env::var("HOME").map_err(|_| "no HOME".to_string())?;
     let mut candidates: Vec<Value> = Vec::new();
     if let Ok(entries) = std::fs::read_dir(&home) {
@@ -743,19 +744,42 @@ pub async fn discover_servers(state: State<'_, Arc<AppState>>) -> Result<Value, 
         }
     }
     let key = state.api_key();
-    let mut classified = Vec::new();
-    for c in &candidates {
-        let name = c["name"].as_str().unwrap_or("");
-        let command = c["command"].as_str().unwrap_or("");
+    let total = candidates.len();
+    let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(4));
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let mut handles = Vec::new();
+    for c in candidates {
+        let name = c["name"].as_str().unwrap_or("").to_string();
+        let command = c["command"].as_str().unwrap_or("").to_string();
         let files: Vec<String> = c["files"].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect()).unwrap_or_default();
-        if let Some(ref k) = key {
-            match crate::classify::classify_server_candidate(name, command, &files, k).await {
-                Ok(cls) => { classified.push(json!({"name": name, "command": command, "source": c["source"], "classification": cls})); }
-                Err(_) => { classified.push(json!({"name": name, "command": command, "source": c["source"], "classification": {"is_mcp": true, "risk_level": "unknown", "description": "Classification failed"}})); }
-            }
-        } else {
-            classified.push(json!({"name": name, "command": command, "source": c["source"], "classification": {"is_mcp": true, "risk_level": "unknown", "description": "No API key"}}));
-        }
+        let source = c["source"].clone();
+        let key = key.clone();
+        let sem = sem.clone();
+        let done = done.clone();
+        let st = state.clone();
+        handles.push(tokio::task::spawn(async move {
+            let cache_key = format!("{}::{}", name, command);
+            let cached = st.discovery_cache.lock().unwrap().get(&cache_key).cloned();
+            let cls = if let Some(hit) = cached {
+                hit
+            } else {
+                let _permit = sem.acquire().await;
+                let result = match &key {
+                    Some(k) => crate::classify::classify_server_candidate(&name, &command, &files, k).await
+                        .unwrap_or_else(|_| json!({"is_mcp": true, "risk_level": "unknown", "description": "Classification failed"})),
+                    None => json!({"is_mcp": true, "risk_level": "unknown", "description": "No API key"}),
+                };
+                st.discovery_cache.lock().unwrap().insert(cache_key, result.clone());
+                let n = done.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                st.emit("discovery-progress", &json!({"done": n, "total": total}));
+                result
+            };
+            json!({"name": name, "command": command, "source": source, "classification": cls})
+        }));
+    }
+    let mut classified = Vec::new();
+    for h in handles {
+        if let Ok(v) = h.await { classified.push(v); }
     }
     Ok(json!({"candidates": classified, "total": classified.len()}))
 }
