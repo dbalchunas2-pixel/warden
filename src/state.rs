@@ -46,10 +46,15 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(config: &toml::Value, config_path: Option<PathBuf>) -> Result<Self> {
+        // Heal a config missing [rules] (e.g. written by a fresh GUI setup before any template existed).
+        let default_rules: toml::Value = toml::from_str(
+            "block_tools = []\nallow_tools = [\"tools/list\", \"initialize\", \"notifications/initialized\"]\npath_block_patterns = []\ncmd_block_patterns = []\nentries = []\n",
+        )?;
         let rules_config = config
             .get("rules")
-            .ok_or_else(|| anyhow::anyhow!("Missing [rules] section in config"))?;
-        let engine = Arc::new(RwLock::new(RuleEngine::new(rules_config)?));
+            .cloned()
+            .unwrap_or(default_rules);
+        let engine = Arc::new(RwLock::new(RuleEngine::new(&rules_config)?));
 
         let confidence_threshold = config
             .get("nebius")
@@ -349,6 +354,15 @@ impl AppState {
             if let Some(t) = disk_cfg.as_table_mut() {
                 t.insert("upstream_command".into(), toml::Value::String(upstream.to_string()));
                 if let Some(key) = &api_key {
+                    if !t.contains_key("nebius") {
+                        let mut n = toml::map::Map::new();
+                        n.insert("model".into(), toml::Value::String("nvidia/Nemotron-3_5-Lightning".into()));
+                        n.insert("base_url".into(), toml::Value::String("https://api.tokenfactory.nebius.com/v1/".into()));
+                        n.insert("api_key_env".into(), toml::Value::String("NEBIUS_API_KEY".into()));
+                        n.insert("max_context_chars".into(), toml::Value::Integer(4096));
+                        n.insert("confidence_threshold".into(), toml::Value::Float(0.7));
+                        t.insert("nebius".into(), toml::Value::Table(n));
+                    }
                     if let Some(n) = t.get_mut("nebius").and_then(|v| v.as_table_mut()) {
                         n.insert("api_key".into(), toml::Value::String(key.clone()));
                     }
