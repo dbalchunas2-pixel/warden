@@ -223,9 +223,40 @@ async function linkGithub(targetId){const status=document.getElementById(targetI
 if(window.__TAURI__&&window.__TAURI__.event){window.__TAURI__.event.listen('redteam-progress',e=>{const b=document.getElementById('redteam-btn');if(b&&b.disabled){b.textContent='Attack '+e.payload.done+' of '+e.payload.total+': '+e.payload.name;}});}
 if(window.__TAURI__&&window.__TAURI__.event){window.__TAURI__.event.listen('discovery-progress',e=>{const d=e.payload.done,t=e.payload.total;document.querySelectorAll('#disc-progress,#setup-scan-status').forEach(el=>{if(el.id==='disc-progress'){el.textContent='Classified '+d+' of '+t+'... ';}else if(el.textContent.indexOf('Scanning')===0){el.textContent='Classifying '+d+' of '+t+'...';}});});}
 
-async function scanClients(){try{const r=await invoke('scan_mcp_clients');let h='';r.clients.forEach(c=>{if(!c.exists){h+='<div style="margin-bottom:8px"><b>'+esc(c.client)+'</b> <span style="color:var(--dim)">not installed</span></div>';return;}h+='<div style="margin-bottom:10px;padding:10px;border:1px solid var(--border);border-radius:8px"><b>'+esc(c.client)+'</b>'+((c.servers||[]).map(s=>'<div style="margin-top:6px;display:flex;justify-content:space-between"><span>'+esc(s.name)+' <span style="color:var(--dim)">'+esc(s.command||'')+'</span></span><span style="color:'+(s.protected?'var(--accent)':(s.remote?'var(--dim)':'var(--danger)'))+'">'+(s.protected?'PROTECTED':(s.remote?'remote (gateway)':'unprotected'))+'</span></div>').join('')+'</div>';});document.getElementById('client-list').innerHTML=h;}catch(e){document.getElementById('client-list').textContent='Error: '+e;}}
-async function protectAll(){const b=document.getElementById('protect-btn');b.textContent='Protecting...';b.disabled=true;try{const r=await invoke('protect_all_clients');document.getElementById('client-list').innerHTML='<div style="color:var(--accent)">Protected. Restart the affected apps to activate.</div>';setTimeout(scanClients,600);}catch(e){document.getElementById('client-list').textContent='Error: '+e;}finally{b.textContent='Protect All Clients';b.disabled=false;}}
-async function restoreClients(){try{const r=await invoke('restore_clients');document.getElementById('client-list').innerHTML='<div style="color:var(--accent)">Restored: '+esc((r.restored||[]).join(', ')||'nothing to restore')+'</div>';}catch(e){document.getElementById('client-list').textContent='Error: '+e;}}
+async function scanClients() {
+  const box = document.getElementById('client-list');
+  try {
+    const r = await invoke('scan_mcp_clients');
+    let h = '';
+    for (const c of r.clients) {
+      if (!c.exists) { h += '<div style="margin-bottom:8px"><b>' + esc(c.client) + '</b> <span style="color:var(--dim)">not installed</span></div>'; continue; }
+      h += '<div style="margin-bottom:10px;padding:10px;border:1px solid var(--border);border-radius:8px"><b>' + esc(c.client) + '</b>';
+      for (const s of (c.servers || [])) {
+        const color = s.protected ? 'var(--accent)' : (s.remote ? 'var(--dim)' : 'var(--danger)');
+        const label = s.protected ? 'PROTECTED' : (s.remote ? 'remote (gateway)' : 'unprotected');
+        h += '<div style="margin-top:6px;display:flex;justify-content:space-between"><span>' + esc(s.name) + ' <span style="color:var(--dim)">' + esc(s.command || '') + '</span></span><span style="color:' + color + '">' + label + '</span></div>';
+      }
+      h += '</div>';
+    }
+    box.innerHTML = h;
+  } catch (e) { box.textContent = 'Error: ' + e; }
+}
+async function protectAll() {
+  const b = document.getElementById('protect-btn');
+  b.textContent = 'Protecting...'; b.disabled = true;
+  try {
+    await invoke('protect_all_clients');
+    document.getElementById('client-list').innerHTML = '<div style="color:var(--accent)">Protected. Restart the affected apps to activate.</div>';
+    setTimeout(scanClients, 600);
+  } catch (e) { document.getElementById('client-list').textContent = 'Error: ' + e; }
+  b.textContent = 'Protect All Clients'; b.disabled = false;
+}
+async function restoreClients() {
+  try {
+    const r = await invoke('restore_clients');
+    document.getElementById('client-list').innerHTML = '<div style="color:var(--accent)">Restored: ' + esc((r.restored || []).join(', ') || 'nothing to restore') + '</div>';
+  } catch (e) { document.getElementById('client-list').textContent = 'Error: ' + e; }
+}
 async function checkForUpdates(){const st=document.getElementById('upd-status');st.textContent='Checking...';try{const u=window.__TAURI__.updater;const pr=window.__TAURI__.process;const upd=await u.check();if(!upd){st.textContent='Up to date.';return;}st.textContent='Downloading '+ (upd.version||'update') +'...';await upd.downloadAndInstall();st.textContent='Installed. Relaunching...';setTimeout(()=>pr.relaunch(),1200);}catch(e){st.textContent='Error: '+String(e);}}
 
 async function setPw(){const msg=document.getElementById('sec-msg');try{await invoke('set_master_password',{password:document.getElementById('sec-pw').value});msg.textContent='Saved.';document.getElementById('sec-pw').value='';window.authState=await invoke('auth_status');updateSecurityPanel(window.authState);}catch(e){msg.textContent=String(e);}}
