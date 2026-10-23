@@ -30,7 +30,7 @@ git add -A && git commit -m "release v$VER" && git tag "v$VER" && git push origi
 
 SIG_CONTENT=$(cat "$SIG")
 TARGZ_NAME=$(basename "$TARGZ")
-gh release create "v$VER" "$TARGZ" "$DMG" --title "Warden v$VER" --notes "Release $VER" --generate-notes
+gh release create "v$VER" "$TARGZ" "$SIG" "$DMG" --title "Warden v$VER" --notes "Release $VER" --generate-notes
 
 cat > /tmp/latest.json << JSON
 {
