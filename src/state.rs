@@ -341,8 +341,10 @@ impl AppState {
             }
         };
         {
-            let mut cfg = self.config.write().unwrap();
-            if let Some(t) = cfg.as_table_mut() {
+            // Re-read from disk so we never clobber concurrent writes (e.g. servers added by add_server during setup).
+            let disk_content = std::fs::read_to_string(&target).unwrap_or_default();
+            let mut disk_cfg: toml::Value = disk_content.parse().unwrap_or(toml::Value::Table(Default::default()));
+            if let Some(t) = disk_cfg.as_table_mut() {
                 t.insert("upstream_command".into(), toml::Value::String(upstream.to_string()));
                 if let Some(key) = &api_key {
                     if let Some(n) = t.get_mut("nebius").and_then(|v| v.as_table_mut()) {
@@ -358,8 +360,10 @@ impl AppState {
                     }
                 }
             }
-            let out = toml::to_string_pretty(&*cfg)?;
+            let out = toml::to_string_pretty(&disk_cfg)?;
             std::fs::write(&target, out)?;
+            // Keep the in-memory snapshot in sync with what we just wrote.
+            *self.config.write().unwrap() = disk_cfg;
         }
         *self.upstream_cmd.write().unwrap() = Some(upstream.to_string());
         if api_key.is_some() {
@@ -432,6 +436,38 @@ impl TokenBucket {
     }
 }
 
+fn resolve_program(prog: &str) -> String {
+    if prog.contains('/') {
+        return prog.to_string();
+    }
+    let mut dirs: Vec<std::path::PathBuf> = vec![
+        "/opt/homebrew/bin".into(),
+        "/usr/local/bin".into(),
+        "/usr/bin".into(),
+        "/bin".into(),
+        "/usr/sbin".into(),
+        "/sbin".into(),
+    ];
+    if let Ok(home) = std::env::var("HOME") {
+        dirs.push(format!("{}/.local/bin", home).into());
+        dirs.push(format!("{}/.cargo/bin", home).into());
+        if let Ok(rd) = std::fs::read_dir(format!("{}/.nvm/versions/node", home)) {
+            let mut vers: Vec<std::path::PathBuf> = rd.filter_map(|e| e.ok()).map(|e| e.path()).collect();
+            vers.sort();
+            if let Some(last) = vers.pop() {
+                dirs.push(last.join("bin"));
+            }
+        }
+    }
+    for d in dirs {
+        let p = d.join(prog);
+        if p.is_file() {
+            return p.to_string_lossy().to_string();
+        }
+    }
+    prog.to_string()
+}
+
 async fn proxy_loop(state: Arc<AppState>, upstream_cmd: String) -> Result<()> {
     let parts: Vec<&str> = upstream_cmd.split_whitespace().collect();
     if parts.is_empty() {
@@ -439,12 +475,13 @@ async fn proxy_loop(state: Arc<AppState>, upstream_cmd: String) -> Result<()> {
     }
     info!("Upstream: {}", upstream_cmd);
 
-    let mut child = TokioCommand::new(parts[0])
+    let prog = resolve_program(parts[0]);
+    let mut child = TokioCommand::new(&prog)
         .args(&parts[1..])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
-        .map_err(|e| anyhow::anyhow!("Failed to spawn upstream '{}': {}", parts[0], e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to spawn upstream '{}': {}", prog, e))?;
 
     let mut child_stdin = child.stdin.take().expect("child stdin");
     let mut child_stdout = BufReader::new(child.stdout.take().expect("child stdout"));
