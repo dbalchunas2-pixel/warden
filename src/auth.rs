@@ -60,6 +60,7 @@ pub fn load_secret(key: &str) -> Option<String> {
     load_all().get(key).cloned()
 }
 
+#[allow(dead_code)]
 pub fn delete_secret(key: &str) {
     let mut map = load_all();
     map.remove(key);

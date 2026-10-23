@@ -207,6 +207,15 @@ fn main() {
             }
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running warden");
+        .build(tauri::generate_context!())
+        .expect("error while building warden")
+        .run({
+            let exit_state = state.clone();
+            move |_app, event| {
+                if let tauri::RunEvent::Exit = event {
+                    exit_state.save_state();
+                    info!("Warden state saved on exit");
+                }
+            }
+        });
 }

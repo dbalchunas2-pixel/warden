@@ -1,4 +1,3 @@
-use crate::classify;
 use crate::rules::{RuleEngine, RuleEntry};
 use crate::state::AppState;
 use serde_json::{json, Value};
@@ -381,13 +380,8 @@ pub async fn oauth_start(
 pub async fn oauth_check(
     state: State<'_, Arc<AppState>>,
     device_code: String,
-    client_id: Option<String>,
+    _client_id: Option<String>,
 ) -> Result<Value, String> {
-    let cid = client_id
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .or_else(|| oauth_client_id(&state))
-        .ok_or_else(|| "GitHub OAuth not configured".to_string())?;
     let cid = oauth_client_id(&state)
         .ok_or_else(|| "GitHub OAuth not configured".to_string())?;
     match crate::auth::device_poll(&cid, &device_code).await.map_err(|e| format!("{:#}", e))? {

@@ -468,6 +468,8 @@ fn resolve_program(prog: &str) -> String {
     prog.to_string()
 }
 
+static SAVE_TICK: AtomicU64 = AtomicU64::new(0);
+
 async fn proxy_loop(state: Arc<AppState>, upstream_cmd: String) -> Result<()> {
     let parts: Vec<&str> = upstream_cmd.split_whitespace().collect();
     if parts.is_empty() {
@@ -619,9 +621,14 @@ async fn proxy_loop(state: Arc<AppState>, upstream_cmd: String) -> Result<()> {
         }
         stdout.write_all(resp.as_bytes()).await?;
         stdout.flush().await?;
+        SAVE_TICK.fetch_add(1, Ordering::SeqCst);
+        if SAVE_TICK.load(Ordering::SeqCst) % 10 == 0 {
+            state.save_state();
+        }
     }
 
     let _ = child.kill().await;
+    state.save_state();
     info!("Warden proxy stopped");
     Ok(())
 }
