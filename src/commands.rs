@@ -670,7 +670,9 @@ pub async fn run_attack_simulation(
     ]);
     let attacks_arr = attacks.as_array().unwrap();
     let mut results = Vec::new();
-    for attack in attacks_arr {
+    for (idx, attack) in attacks_arr.iter().enumerate() {
+        let aname = attack["name"].as_str().unwrap_or("attack");
+        state.emit("redteam-progress", &json!({"done": idx + 1, "total": attacks_arr.len(), "name": aname}));
         let method = attack["method"].as_str().unwrap_or("tools/call");
         let params = &attack["params"];
         let t0 = std::time::Instant::now();
@@ -691,7 +693,9 @@ pub async fn run_attack_simulation(
                 None => ("blocked", "No rule+no LLM".to_string(), "RULES"),
             }
         };
-        results.push(json!({"level": attack["level"], "name": attack["name"], "description": attack["description"], "method": method, "params": params, "verdict": verdict, "reason": reason, "layer": layer, "ms": t0.elapsed().as_millis() as u64}));
+        let sim_reason = format!("[SIM] {}", reason);
+        state.push_event(method, params, &verdict, &sim_reason, &layer);
+        results.push(json!({"level": attack["level"], "name": attack["name"], "description": attack["description"], "method": method, "params": params, "verdict": verdict, "reason": sim_reason, "layer": layer, "ms": t0.elapsed().as_millis() as u64}));
     }
     let blocked_count = results.iter().filter(|r| r["verdict"] == "blocked").count();
     Ok(json!({"results": results, "total": results.len(), "blocked": blocked_count, "all_blocked": blocked_count == results.len()}))
