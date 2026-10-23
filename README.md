@@ -12,13 +12,28 @@ The stdio proxy and the dashboard are **one application**: the proxy inspects JS
 
 ## Install
 
-One command - no frontend build step, no Node required:
+### Option 1: Build from source (recommended)
 
 ```bash
-cargo install --git https://github.com/dbalchunas2-pixel/warden
+git clone https://github.com/dbalchunas2-pixel/warden.git
+cd warden
+./install.sh
 ```
 
-Or download `Warden_0.2.0_aarch64.dmg` from a release and drag **Warden.app** to Applications.
+This builds the binary, creates the .app bundle, and installs to /Applications.
+
+### Option 2: Manual build with Tauri CLI
+
+```bash
+git clone https://github.com/dbalchunas2-pixel/warden.git
+cd warden
+npx @tauri-apps/cli@2 build
+open target/release/bundle/macos/Warden.app
+```
+
+### Option 3: Download DMG
+
+Download `Warden_0.3.0_aarch64.dmg` from a release and drag **Warden.app** to Applications.
 
 ## Quick Start
 
