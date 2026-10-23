@@ -3,6 +3,8 @@ mod auth;
 use tauri::Manager;
 mod classify;
 mod commands;
+mod clients;
+mod gateway;
 mod rules;
 mod state;
 
@@ -183,10 +185,14 @@ fn main() {
             commands::get_posture_score,
             commands::export_policy,
             commands::import_policy,
-        ])
+        clients::scan_mcp_clients,
+            clients::protect_all_clients,
+            clients::restore_clients,
+            ])
         .setup(move |app| {
             use tauri::Emitter;
             setup_state.set_handle(app.handle().clone());
+            gateway::start_gateway(setup_state.clone(), 8765);
 
             let upstream = upstream_arg
                 .clone()

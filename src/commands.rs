@@ -290,7 +290,7 @@ pub fn start_proxy(state: State<'_, Arc<AppState>>) -> Result<Value, String> {
 // ---------- Auth: master password + GitHub identity ----------
 
 /// Policy-mutating commands require the dashboard to be unlocked.
-fn gate(state: &Arc<AppState>) -> Result<(), String> {
+pub(crate) fn gate(state: &Arc<AppState>) -> Result<(), String> {
     if crate::auth::has_master_password() && !state.unlocked.load(Ordering::SeqCst) {
         return Err("Warden is locked. Unlock to change policy.".into());
     }
