@@ -118,6 +118,18 @@ fn main() {
         )
         .init();
 
+    std::panic::set_hook(Box::new(|info| {
+        let msg = format!("WARDEN PANIC: {}", info);
+        eprintln!("{}", msg);
+        if let Ok(home) = std::env::var("HOME") {
+            let p = std::path::Path::new(&home).join("Library/Application Support/Warden/panics.log");
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
+                use std::io::Write;
+                let _ = writeln!(f, "{} | {} | {}", chrono::Utc::now().to_rfc3339(), msg, info.location().map(|l| l.to_string()).unwrap_or_default());
+            }
+        }
+    }));
+
     let (config_path_arg, upstream_arg) = parse_args();
 
     let (config, config_path) = match load_config(&config_path_arg) {
@@ -193,6 +205,37 @@ fn main() {
             use tauri::Emitter;
             setup_state.set_handle(app.handle().clone());
             gateway::start_gateway(setup_state.clone(), 8765);
+
+            // F3 startup self-test: prove /check round-trips a BLOCKED verdict, else scream.
+            {
+                let st = setup_state.clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+                    let client = reqwest::Client::new();
+                    let body = serde_json::json!({
+                        "jsonrpc": "2.0", "method": "tools/call", "id": 0,
+                        "params": {"name": "__selftest__", "arguments": {"command": "cat ~/.ssh/id_rsa"}}
+                    });
+                    let probe = async {
+                        let resp = client.post("http://127.0.0.1:8765/check/__selftest__")
+                            .json(&body)
+                            .timeout(std::time::Duration::from_secs(15))
+                            .send().await.ok()?;
+                        let v: serde_json::Value = resp.json().await.ok()?;
+                        Some(v.get("allow")?.as_bool()? == false)
+                    };
+                    match probe.await {
+                        Some(true) => info!("[selftest] /check round-trip OK: known-bad payload BLOCKED (enforcement verified)"),
+                        _ => {
+                            error!("PROTECTION DEGRADED: /check self-test FAILED - known-bad payload did not come back BLOCKED. Do not trust enforcement; check panics.log");
+                            st.emit("protection-degraded", &serde_json::json!({
+                                "ok": false,
+                                "detail": "startup self-test: /check did not return a blocked verdict for a known-bad payload"
+                            }));
+                        }
+                    }
+                });
+            }
 
             let upstream = upstream_arg
                 .clone()

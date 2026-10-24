@@ -28,6 +28,8 @@ pub struct AppState {
     pub audit_path: String,
     pub state_path: String,
     pub last_call_ms: AtomicU64,
+    pub classifier_fails: std::sync::atomic::AtomicU32,
+    pub breaker_until_ms: AtomicU64,
     pub last_notify: Mutex<std::time::Instant>,
     pub llm_bucket: Mutex<TokenBucket>,
     verdict_cache: Mutex<HashMap<u64, crate::classify::Classification>>,
@@ -133,6 +135,8 @@ impl AppState {
             api_key_config: RwLock::new(api_key),
             app_handle: RwLock::new(None),
             last_call_ms: AtomicU64::new(0),
+            classifier_fails: std::sync::atomic::AtomicU32::new(0),
+            breaker_until_ms: AtomicU64::new(0),
             last_notify: Mutex::new(std::time::Instant::now()),
             llm_bucket: Mutex::new(TokenBucket::new()),
             verdict_cache: Mutex::new(HashMap::new()),
@@ -146,8 +150,8 @@ impl AppState {
         };
         st.load_audit_history();
         {
-            let entries = st.entries.lock().unwrap();
-            let mut cs = st.cum_stats.lock().unwrap();
+            let entries = st.entries.lock().unwrap_or_else(|e| e.into_inner());
+            let mut cs = st.cum_stats.lock().unwrap_or_else(|e| e.into_inner());
             for e in entries.iter() {
                 cs.total_calls += 1;
                 if e.get("verdict").and_then(|v| v.as_str()) == Some("allowed") { cs.total_allowed += 1; }
@@ -158,15 +162,15 @@ impl AppState {
     }
 
     pub fn set_handle(&self, h: AppHandle) {
-        *self.app_handle.write().unwrap() = Some(h);
+        *self.app_handle.write().unwrap_or_else(|e| e.into_inner()) = Some(h);
     }
 
     pub fn set_status(&self, s: &str) {
-        *self.proxy_status.write().unwrap() = s.to_string();
+        *self.proxy_status.write().unwrap_or_else(|e| e.into_inner()) = s.to_string();
     }
 
     pub fn emit(&self, event: &str, payload: &Value) {
-        if let Some(h) = self.app_handle.read().unwrap().as_ref() {
+        if let Some(h) = self.app_handle.read().unwrap_or_else(|e| e.into_inner()).as_ref() {
             let _ = h.emit(event, payload);
         }
     }
@@ -178,7 +182,7 @@ impl AppState {
                 return Some(k);
             }
         }
-        self.api_key_config.read().unwrap().clone()
+        self.api_key_config.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     pub fn upstream_from_config(&self) -> Option<String> {
@@ -198,7 +202,7 @@ impl AppState {
             for line in content.lines().rev() {
                 if count >= 1000 { break; }
                 if let Ok(v) = serde_json::from_str::<Value>(line) {
-                    self.entries.lock().unwrap().push_front(v);
+                    self.entries.lock().unwrap_or_else(|e| e.into_inner()).push_front(v);
                     count += 1;
                 }
             }
@@ -216,12 +220,12 @@ impl AppState {
         method.hash(&mut h);
         serde_json::to_string(params).unwrap_or_default().hash(&mut h);
         let k = h.finish();
-        if let Some(c) = self.verdict_cache.lock().unwrap().get(&k) {
+        if let Some(c) = self.verdict_cache.lock().unwrap_or_else(|e| e.into_inner()).get(&k) {
             tracing::info!("Verdict cache hit for {} (deterministic)", method);
             return Ok(c.clone());
         }
         let c = crate::classify::classify_tool_call(method, params, api_key).await?;
-        self.verdict_cache.lock().unwrap().insert(k, c.clone());
+        self.verdict_cache.lock().unwrap_or_else(|e| e.into_inner()).insert(k, c.clone());
         Ok(c)
     }
 
@@ -230,7 +234,7 @@ impl AppState {
     pub fn notify_block(&self, title: &str, body: &str) {
         use tauri::Manager;
         use tauri_plugin_notification::NotificationExt;
-        let handle = self.app_handle.read().unwrap();
+        let handle = self.app_handle.read().unwrap_or_else(|e| e.into_inner());
         let Some(app) = handle.as_ref() else { return };
         let focused = app
             .get_webview_window("main")
@@ -238,7 +242,7 @@ impl AppState {
             .unwrap_or(false);
         if focused { return; }
         {
-            let mut last = self.last_notify.lock().unwrap();
+            let mut last = self.last_notify.lock().unwrap_or_else(|e| e.into_inner());
             if last.elapsed() < std::time::Duration::from_secs(10) { return; }
             *last = std::time::Instant::now();
         }
@@ -266,7 +270,7 @@ impl AppState {
             let _ = writeln!(file, "{}", entry);
         }
         {
-            let mut entries = self.entries.lock().unwrap();
+            let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
             if entries.len() >= 1000 {
                 entries.pop_front();
             }
@@ -274,23 +278,23 @@ impl AppState {
         }
         self.emit("tool-call-event", &entry);
         {
-            let mut bl = self.baseline.lock().unwrap();
+            let mut bl = self.baseline.lock().unwrap_or_else(|e| e.into_inner());
             let ec = bl.entry(method.to_string()).or_insert((0, chrono::Utc::now().to_rfc3339()));
             ec.0 += 1;
         }
         {
-            let mut cs = self.cum_stats.lock().unwrap();
+            let mut cs = self.cum_stats.lock().unwrap_or_else(|e| e.into_inner());
             cs.total_calls += 1;
             if verdict == "allowed" { cs.total_allowed += 1; }
             if verdict == "blocked" { cs.total_blocked += 1; }
             if cs.total_calls % 10 == 0 {
-                save_persistent_state(&self.state_path, &self.baseline.lock().unwrap(), &cs);
+                save_persistent_state(&self.state_path, &self.baseline.lock().unwrap_or_else(|e| e.into_inner()), &cs);
             }
         }
     }
 
     pub fn check_anomaly(&self, method: &str) -> Option<String> {
-        let bl = self.baseline.lock().unwrap();
+        let bl = self.baseline.lock().unwrap_or_else(|e| e.into_inner());
         if !bl.contains_key(method) {
             return Some(format!("Anomaly: '{}' has never been called in baseline", method));
         }
@@ -303,14 +307,14 @@ impl AppState {
     }
 
     pub fn save_state(&self) {
-        save_persistent_state(&self.state_path, &self.baseline.lock().unwrap(), &self.cum_stats.lock().unwrap());
+        save_persistent_state(&self.state_path, &self.baseline.lock().unwrap_or_else(|e| e.into_inner()), &self.cum_stats.lock().unwrap_or_else(|e| e.into_inner()));
     }
 
     pub fn start_proxy(self: &Arc<Self>, cmd: &str) -> Result<()> {
         if self.proxy_running.load(Ordering::SeqCst) {
             anyhow::bail!("Proxy already running");
         }
-        *self.upstream_cmd.write().unwrap() = Some(cmd.to_string());
+        *self.upstream_cmd.write().unwrap_or_else(|e| e.into_inner()) = Some(cmd.to_string());
         self.proxy_running.store(true, Ordering::SeqCst);
         self.set_status("running");
 
@@ -336,7 +340,7 @@ impl AppState {
         client_id: Option<String>,
     ) -> Result<String> {
         let target = {
-            let cur = self.config_path.read().unwrap().clone();
+            let cur = self.config_path.read().unwrap_or_else(|e| e.into_inner()).clone();
             match cur {
                 Some(p) => p,
                 None => {
@@ -379,11 +383,11 @@ impl AppState {
             let out = toml::to_string_pretty(&disk_cfg)?;
             std::fs::write(&target, out)?;
             // Keep the in-memory snapshot in sync with what we just wrote.
-            *self.config.write().unwrap() = disk_cfg;
+            *self.config.write().unwrap_or_else(|e| e.into_inner()) = disk_cfg;
         }
-        *self.upstream_cmd.write().unwrap() = Some(upstream.to_string());
+        *self.upstream_cmd.write().unwrap_or_else(|e| e.into_inner()) = Some(upstream.to_string());
         if api_key.is_some() {
-            *self.api_key_config.write().unwrap() = api_key;
+            *self.api_key_config.write().unwrap_or_else(|e| e.into_inner()) = api_key;
         }
         Ok(target.display().to_string())
     }
@@ -535,7 +539,7 @@ async fn proxy_loop(state: Arc<AppState>, upstream_cmd: String) -> Result<()> {
 
         if method.starts_with("tools/") {
             let decision = {
-                let engine = state.engine.read().unwrap();
+                let engine = state.engine.read().unwrap_or_else(|e| e.into_inner());
                 engine.check(&method, &params)
             };
 
@@ -572,7 +576,7 @@ async fn proxy_loop(state: Arc<AppState>, upstream_cmd: String) -> Result<()> {
                             continue;
                         }
                         Some(key) => {
-                            if !state.llm_bucket.lock().unwrap().try_acquire() {
+                            if !state.llm_bucket.lock().unwrap_or_else(|e| e.into_inner()).try_acquire() {
                                 let reason = "Rate limit exceeded: LLM classification budget exhausted. Blocked fail-closed without calling the LLM.";
                                 warn!("BLOCK: {} - {}", method, reason);
                                 let err = jsonrpc_error(&request, reason);

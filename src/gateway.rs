@@ -1,9 +1,14 @@
 // Warden — local HTTP/WebSocket gateway: inspect JSON-RPC for any MCP client that points at 127.0.0.1:8765.
+// F1 rewrite: poison-recovering locks, logged writes, stage markers, flush+shutdown.
 use crate::state::AppState;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
-use tracing::info;
+use tracing::{debug, error, info};
+
+macro_rules! gwmark {
+    ($($arg:tt)*) => { debug!("[GWMARK] {}", format!($($arg)*)) };
+}
 
 pub fn start_gateway(state: Arc<AppState>, port: u16) {
     tauri::async_runtime::spawn(async move {
@@ -15,14 +20,14 @@ pub fn start_gateway(state: Arc<AppState>, port: u16) {
         loop {
             if let Ok((stream, _)) = listener.accept().await {
                 let st = state.clone();
-                tokio::spawn(handle_connection(st, stream));
+                tauri::async_runtime::spawn(handle_connection(st, stream));
             }
         }
     });
 }
 
 fn upstream_url(state: &Arc<AppState>, name: &str) -> Option<String> {
-    let cfg = state.config.read().unwrap();
+    let cfg = state.config.read().unwrap_or_else(|e| e.into_inner());
     cfg.get("http_servers")
         .and_then(|v| v.as_array())
         .and_then(|arr| arr.iter().find(|s| s.get("name").and_then(|n| n.as_str()) == Some(name)))
@@ -31,32 +36,65 @@ fn upstream_url(state: &Arc<AppState>, name: &str) -> Option<String> {
 }
 
 async fn decide(state: &Arc<AppState>, method: &str, params: &Value) -> (bool, String, &'static str) {
-    let decision = { let engine = state.engine.read().unwrap(); engine.check(method, params) };
+    gwmark!("decide enter method={}", method);
+    let decision = {
+        let engine = state.engine.read().unwrap_or_else(|e| e.into_inner());
+        engine.check(method, params)
+    };
     match decision {
-        Some(d) => (d.allow, d.reason, "RULES"),
-        None => match state.api_key() {
-            Some(k) => match state.classify_cached(method, params, &k).await {
-                Ok(c) => {
-                    let allow = c.verdict == "allow" && c.confidence >= state.confidence_threshold;
-                    (allow, format!("{} ({:.2})", c.reasoning, c.confidence), "LLM")
-                }
-                Err(e) => (false, format!("classifier error: {} (fail closed)", e), "ERROR"),
-            },
-            None => (false, "no rule match + no LLM key (fail closed)".into(), "RULES"),
-        },
+        Some(d) => { gwmark!("decide RULES allow={}", d.allow); (d.allow, d.reason, "RULES") }
+        None => {
+            // F5 circuit breaker: after repeated classifier infra failures, go
+            // rules-only for a 60s cooldown instead of hard-blocking benign calls.
+            let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+            if state.breaker_until_ms.load(std::sync::atomic::Ordering::SeqCst) > now_ms {
+                gwmark!("decide BREAKER OPEN - rules-only mode");
+                (true, "classifier unavailable (circuit breaker open) - rules-only mode, NO LLM DECISION for this call".into(), "OPEN-DEGRADED")
+            } else {
+            match state.api_key() {
+                Some(k) => match state.classify_cached(method, params, &k).await {
+                    Ok(c) => {
+                        state.classifier_fails.store(0, std::sync::atomic::Ordering::SeqCst);
+                        let allow = c.verdict == "allow" && c.confidence >= state.confidence_threshold;
+                        gwmark!("decide LLM allow={}", allow);
+                        (allow, format!("{} ({:.2})", c.reasoning, c.confidence), "LLM")
+                    }
+                    Err(e) => {
+                        let f = state.classifier_fails.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                        if f >= 3 {
+                            state.breaker_until_ms.store(now_ms + 60_000, std::sync::atomic::Ordering::SeqCst);
+                            tracing::error!("[breaker] classifier failed {}x consecutively - OPEN for 60s (rules-only mode)", f);
+                        }
+                        gwmark!("decide ERROR fail-closed (fail #{})", f);
+                        (false, format!("classifier error: {} (fail closed)", e), "ERROR")
+                    }
+                },
+                None => { gwmark!("decide NOKEY fail-closed"); (false, "no rule match + no LLM key (fail closed)".into(), "RULES") }
+            }
+            }
+        }
     }
 }
 
+async fn write_response(stream: &mut tokio::net::TcpStream, resp: &[u8]) {
+    match stream.write_all(resp).await {
+        Ok(_) => gwmark!("write OK ({} bytes)", resp.len()),
+        Err(e) => error!("[gateway] WRITE FAILED ({} bytes): {}", resp.len(), e),
+    }
+    if let Err(e) = stream.flush().await { error!("[gateway] FLUSH FAILED: {}", e); }
+    let _ = stream.shutdown().await;
+}
+
 async fn handle_connection(state: Arc<AppState>, mut stream: tokio::net::TcpStream) {
-        // Read headers
+    gwmark!("conn open peer={}", stream.peer_addr().map(|a| a.to_string()).unwrap_or_default());
     let mut buf = Vec::new();
     let mut tmp = [0u8; 4096];
     let header_end;
     loop {
-        let n = match tokio::io::AsyncReadExt::read(&mut stream, &mut tmp).await { Ok(0) => return, Ok(n) => n, Err(_) => return };
+        let n = match tokio::io::AsyncReadExt::read(&mut stream, &mut tmp).await { Ok(0) => { gwmark!("conn EOF early"); return }, Ok(n) => n, Err(e) => { gwmark!("conn read err: {}", e); return } };
         buf.extend_from_slice(&tmp[..n]);
         if let Some(pos) = find_subsequence(&buf, b"\r\n\r\n") { header_end = pos; break; }
-        if buf.len() > 64 * 1024 { return; }
+        if buf.len() > 64 * 1024 { gwmark!("conn headers too big"); return; }
     }
     let head = String::from_utf8_lossy(&buf[..header_end]).to_string();
     let mut lines = head.split("\r\n");
@@ -75,25 +113,30 @@ async fn handle_connection(state: Arc<AppState>, mut stream: tokio::net::TcpStre
         let n = match tokio::io::AsyncReadExt::read(&mut stream, &mut tmp).await { Ok(0) => break, Ok(n) => n, Err(_) => return };
         body.extend_from_slice(&tmp[..n]);
     }
+    gwmark!("req {} {} bodylen={}", http_method, full_path, body.len());
 
     // Decision-only route: POST /check/<name> with a JSON-RPC body -> {allow, reason, layer}.
     if full_path.starts_with("/check/") {
         let sname = full_path.trim_start_matches("/check/").to_string();
         if http_method != "POST" {
-            let _ = stream.write_all(b"HTTP/1.1 405 Method Not Allowed\r\ncontent-length: 0\r\n\r\n");
+            gwmark!("route 405");
+            write_response(&mut stream, b"HTTP/1.1 405 Method Not Allowed\r\ncontent-length: 0\r\n\r\n").await;
             return;
         }
         let req: Value = match serde_json::from_slice(&body) { Ok(v) => v, Err(_) => {
-            let _ = stream.write_all(b"HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\n\r\n");
+            gwmark!("route 400 bad json");
+            write_response(&mut stream, b"HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\n\r\n").await;
             return;
         }};
         let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("").to_string();
         let params = req.get("params").cloned().unwrap_or(json!({}));
         let (allow, reason, layer) = decide(&state, &method, &params).await;
+        gwmark!("decided allow={} layer={}", allow, layer);
         state.push_event(&method, &params, if allow {"allowed"} else {"blocked"}, &reason, &format!("CHK-{}-{}", layer, sname));
+        gwmark!("push_event done");
         let payload = json!({"allow": allow, "reason": reason, "layer": layer}).to_string();
         let resp = format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}", payload.len(), payload);
-        let _ = stream.write_all(resp.as_bytes());
+        write_response(&mut stream, resp.as_bytes()).await;
         return;
     }
     let name = full_path.trim_start_matches("/mcp/").split('/').next().unwrap_or("").to_string();
@@ -102,7 +145,8 @@ async fn handle_connection(state: Arc<AppState>, mut stream: tokio::net::TcpStre
         return;
     }
     let Some(upstream) = upstream_url(&state, &name) else {
-        let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\ncontent-type: application/json\r\n\r\n{\"error\":\"unknown gateway server; add it to warden.toml [http_servers]\"}");
+        gwmark!("route 404 unknown server {}", name);
+        write_response(&mut stream, b"HTTP/1.1 404 Not Found\r\ncontent-type: application/json\r\n\r\n{\"error\":\"unknown gateway server; add it to warden.toml [http_servers]\"}").await;
         return;
     };
 
@@ -124,7 +168,7 @@ async fn handle_connection(state: Arc<AppState>, mut stream: tokio::net::TcpStre
                     };
                     let payload = if id.is_some() { serde_json::to_string(&err_body).unwrap_or_default() } else { String::new() };
                     let resp = format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}", payload.len(), payload);
-                    let _ = stream.write_all(resp.as_bytes());
+                    write_response(&mut stream, resp.as_bytes()).await;
                     return;
                 }
             }
@@ -140,8 +184,7 @@ async fn handle_connection(state: Arc<AppState>, mut stream: tokio::net::TcpStre
     if let Some(ac) = headers.get("accept") { fwd = fwd.header("accept", ac.clone()); }
     if let Some(sid) = headers.get("mcp-session-id") { fwd = fwd.header("mcp-session-id", sid.clone()); }
     let upstream_resp = match fwd.send().await { Ok(r) => r, Err(e) => {
-        let resp = format!("HTTP/1.1 502 Bad Gateway\r\ncontent-length: 0\r\n\r\n");
-        let _ = stream.write_all(resp.as_bytes());
+        write_response(&mut stream, b"HTTP/1.1 502 Bad Gateway\r\ncontent-length: 0\r\n\r\n").await;
         info!("[gateway] upstream error: {}", e);
         return;
     }};
@@ -154,7 +197,7 @@ async fn handle_connection(state: Arc<AppState>, mut stream: tokio::net::TcpStre
     if let Some(s) = sid { resp.extend_from_slice(s.as_bytes()); }
     resp.extend_from_slice(format!("content-length: {}\r\nconnection: close\r\n\r\n", resp_body.len()).as_bytes());
     resp.extend_from_slice(&resp_body);
-    let _ = stream.write_all(&resp);
+    write_response(&mut stream, &resp).await;
 }
 
 async fn handle_ws(state: Arc<AppState>, stream: tokio::net::TcpStream, name: &str) {

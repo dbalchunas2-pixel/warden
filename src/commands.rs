@@ -9,13 +9,13 @@ use tauri::State;
 /// Newest-first audit entries from the in-memory buffer.
 #[tauri::command]
 pub fn get_audit_log(state: State<'_, Arc<AppState>>) -> Vec<Value> {
-    let entries = state.entries.lock().unwrap();
+    let entries = state.entries.lock().unwrap_or_else(|e| e.into_inner());
     entries.iter().rev().cloned().collect()
 }
 
 #[tauri::command]
 pub fn get_rules(state: State<'_, Arc<AppState>>) -> Vec<RuleEntry> {
-    state.engine.read().unwrap().list_rules()
+    state.engine.read().unwrap_or_else(|e| e.into_inner()).list_rules()
 }
 
 /// Add a path/cmd regex rule at runtime. Validates the regex before installing.
@@ -34,7 +34,7 @@ pub fn add_rule(
     }
     regex::Regex::new(&pattern).map_err(|e| format!("Invalid regex: {}", e))?;
 
-    let mut engine = state.engine.write().unwrap();
+    let mut engine = state.engine.write().unwrap_or_else(|e| e.into_inner());
     let mut current = engine.list_rules();
     current.push(RuleEntry {
         rule_type: rule_type.clone(),
@@ -52,7 +52,7 @@ pub fn add_rule(
 #[tauri::command]
 pub fn delete_rule(state: State<'_, Arc<AppState>>, idx: usize) -> Result<Value, String> {
     gate(&state)?;
-    let mut engine = state.engine.write().unwrap();
+    let mut engine = state.engine.write().unwrap_or_else(|e| e.into_inner());
     let mut current = engine.list_rules();
     if idx >= current.len() {
         return Err(format!("Rule index {} out of range ({} rules)", idx, current.len()));
@@ -72,7 +72,7 @@ pub fn delete_rule(state: State<'_, Arc<AppState>>, idx: usize) -> Result<Value,
 pub fn toggle_rule(state: State<'_, Arc<AppState>>, idx: usize) -> Result<Value, String> {
     gate(&state)?;
     let entries = {
-        let mut engine = state.engine.write().unwrap();
+        let mut engine = state.engine.write().unwrap_or_else(|e| e.into_inner());
         engine.toggle(idx).map_err(|e| e.to_string())?;
         engine.list_rules()
     };
@@ -82,7 +82,7 @@ pub fn toggle_rule(state: State<'_, Arc<AppState>>, idx: usize) -> Result<Value,
 
 /// Write the full rule list back to the user's warden.toml
 fn persist_rules(state: &Arc<AppState>, entries: &[crate::rules::RuleEntry]) -> Result<(), String> {
-    let path = state.config_path.read().unwrap().as_ref().map(|p| p.display().to_string());
+    let path = state.config_path.read().unwrap_or_else(|e| e.into_inner()).as_ref().map(|p| p.display().to_string());
     let Some(path) = path else { return Ok(()) };
     let content = std::fs::read_to_string(&path).unwrap_or_default();
     let mut cfg: toml::Value = content.parse().unwrap_or(toml::Value::Table(Default::default()));
@@ -158,7 +158,7 @@ pub async fn test_tool_call(
     };
 
     let decision = {
-        let engine = state.engine.read().unwrap();
+        let engine = state.engine.read().unwrap_or_else(|e| e.into_inner());
         engine.check(&method, &params)
     };
 
@@ -212,11 +212,11 @@ pub async fn test_tool_call(
 
 #[tauri::command]
 pub fn get_stats(state: State<'_, Arc<AppState>>) -> Value {
-    let entries = state.entries.lock().unwrap();
+    let entries = state.entries.lock().unwrap_or_else(|e| e.into_inner());
     let total = entries.len();
     let allowed = entries.iter().filter(|e| e.get("verdict").and_then(|v| v.as_str()) == Some("allowed")).count();
     let blocked = entries.iter().filter(|e| e.get("verdict").and_then(|v| v.as_str()) == Some("blocked")).count();
-    let rules = state.engine.read().unwrap().rule_count();
+    let rules = state.engine.read().unwrap_or_else(|e| e.into_inner()).rule_count();
     let rate = if total > 0 { (blocked as f64 / total as f64 * 100.0).round() as u64 } else { 0 };
     json!({
         "total": total,
@@ -229,10 +229,10 @@ pub fn get_stats(state: State<'_, Arc<AppState>>) -> Value {
 
 #[tauri::command]
 pub fn get_status(state: State<'_, Arc<AppState>>) -> Value {
-    let upstream = state.upstream_cmd.read().unwrap().clone();
-    let proxy_status = state.proxy_status.read().unwrap().clone();
+    let upstream = state.upstream_cmd.read().unwrap_or_else(|e| e.into_inner()).clone();
+    let proxy_status = state.proxy_status.read().unwrap_or_else(|e| e.into_inner()).clone();
     let llm_enabled = state.api_key().is_some();
-    let rules = state.engine.read().unwrap().rule_count();
+    let rules = state.engine.read().unwrap_or_else(|e| e.into_inner()).rule_count();
     let config_path = state
         .config_path
         .read()
@@ -240,7 +240,7 @@ pub fn get_status(state: State<'_, Arc<AppState>>) -> Value {
         .as_ref()
         .map(|p| p.display().to_string());
     let (bucket_tokens, bucket_burst, bucket_refill) = {
-        let mut b = state.llm_bucket.lock().unwrap();
+        let mut b = state.llm_bucket.lock().unwrap_or_else(|e| e.into_inner());
         (b.available(), b.burst, b.refill_per_sec)
     };
     json!({
@@ -414,7 +414,7 @@ pub async fn oauth_check(
 // Warden stays a single-server stdio gateway per instance.
 
 fn config_target(state: &Arc<AppState>) -> Result<PathBuf, String> {
-    let cur = state.config_path.read().unwrap().clone();
+    let cur = state.config_path.read().unwrap_or_else(|e| e.into_inner()).clone();
     if let Some(p) = cur {
         return Ok(p);
     }
@@ -663,7 +663,7 @@ pub async fn summarize_audit(
     let key = state.api_key().ok_or_else(|| {
         "No Nebius API key configured. Add it in Security or setup to use LLM features.".to_string()
     })?;
-    let entries = state.entries.lock().unwrap().iter().cloned().collect::<Vec<_>>();
+    let entries = state.entries.lock().unwrap_or_else(|e| e.into_inner()).iter().cloned().collect::<Vec<_>>();
     crate::classify::summarize_audit(&entries, &key)
         .await
         .map_err(|e| e.to_string())
@@ -691,7 +691,7 @@ pub async fn run_attack_simulation(
         let params = &attack["params"];
         let t0 = std::time::Instant::now();
         let decision = {
-            let engine = state.engine.read().unwrap();
+            let engine = state.engine.read().unwrap_or_else(|e| e.into_inner());
             engine.check(method, params)
         };
         let (verdict, reason, layer) = match decision {
@@ -777,7 +777,7 @@ pub async fn discover_servers(state: State<'_, Arc<AppState>>) -> Result<Value, 
         let st = state.clone();
         handles.push(tokio::task::spawn(async move {
             let cache_key = format!("{}::{}", name, command);
-            let cached = st.discovery_cache.lock().unwrap().get(&cache_key).cloned();
+            let cached = st.discovery_cache.lock().unwrap_or_else(|e| e.into_inner()).get(&cache_key).cloned();
             let cls = if let Some(hit) = cached {
                 hit
             } else {
@@ -787,7 +787,7 @@ pub async fn discover_servers(state: State<'_, Arc<AppState>>) -> Result<Value, 
                         .unwrap_or_else(|_| json!({"is_mcp": true, "risk_level": "unknown", "description": "Classification failed"})),
                     None => json!({"is_mcp": true, "risk_level": "unknown", "description": "No API key"}),
                 };
-                st.discovery_cache.lock().unwrap().insert(cache_key, result.clone());
+                st.discovery_cache.lock().unwrap_or_else(|e| e.into_inner()).insert(cache_key, result.clone());
                 let n = done.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
                 st.emit("discovery-progress", &json!({"done": n, "total": total}));
                 result
@@ -806,9 +806,9 @@ pub async fn discover_servers(state: State<'_, Arc<AppState>>) -> Result<Value, 
 
 #[tauri::command]
 pub fn get_baseline(state: State<'_, Arc<AppState>>) -> Value {
-    let bl = state.baseline.lock().unwrap();
+    let bl = state.baseline.lock().unwrap_or_else(|e| e.into_inner());
     let entries: Vec<Value> = bl.iter().map(|(method, (count, first_seen))| json!({"method": method, "count": count, "first_seen": first_seen})).collect();
-    let cs = state.cum_stats.lock().unwrap();
+    let cs = state.cum_stats.lock().unwrap_or_else(|e| e.into_inner());
     json!({"baseline": entries, "total_methods": entries.len(), "cumulative": {"total_calls": cs.total_calls, "total_allowed": cs.total_allowed, "total_blocked": cs.total_blocked}})
 }
 
@@ -822,7 +822,7 @@ pub fn check_anomaly_cmd(state: State<'_, Arc<AppState>>, method: String) -> Opt
 #[tauri::command]
 pub async fn run_comparative(state: State<'_, Arc<AppState>>, method: String, args_json: String) -> Result<Value, String> {
     let params: Value = if args_json.trim().is_empty() { json!({}) } else { serde_json::from_str(&args_json).map_err(|e| format!("Invalid JSON: {}", e))? };
-    let warden_result = { let engine = state.engine.read().unwrap(); engine.check(&method, &params) };
+    let warden_result = { let engine = state.engine.read().unwrap_or_else(|e| e.into_inner()); engine.check(&method, &params) };
     let (wv, wr, wl) = match warden_result {
         Some(d) => (if d.allow {"allowed"} else {"blocked"}, d.reason.clone(), "RULES"),
         None => match state.api_key() {
@@ -840,10 +840,10 @@ pub async fn run_comparative(state: State<'_, Arc<AppState>>, method: String, ar
 
 #[tauri::command]
 pub fn get_posture_score(state: State<'_, Arc<AppState>>) -> Value {
-    let rules = state.engine.read().unwrap().rule_count();
+    let rules = state.engine.read().unwrap_or_else(|e| e.into_inner()).rule_count();
     let llm_enabled = state.api_key().is_some();
     let has_password = crate::auth::has_master_password();
-    let entries = state.entries.lock().unwrap();
+    let entries = state.entries.lock().unwrap_or_else(|e| e.into_inner());
     let total = entries.len();
     let blocked = entries.iter().filter(|e| e.get("verdict").and_then(|v| v.as_str()) == Some("blocked")).count();
     crate::classify::assess_posture(rules, llm_enabled, blocked, total, has_password)
@@ -853,9 +853,9 @@ pub fn get_posture_score(state: State<'_, Arc<AppState>>) -> Value {
 
 #[tauri::command]
 pub fn export_policy(state: State<'_, Arc<AppState>>) -> Result<Value, String> {
-    let rules = state.engine.read().unwrap().list_rules();
+    let rules = state.engine.read().unwrap_or_else(|e| e.into_inner()).list_rules();
     let servers = read_servers(&state).unwrap_or_default();
-    let config_path = state.config_path.read().unwrap().as_ref().map(|p| p.display().to_string());
+    let config_path = state.config_path.read().unwrap_or_else(|e| e.into_inner()).as_ref().map(|p| p.display().to_string());
     Ok(json!({"version": "1.0", "exported_at": chrono::Utc::now().to_rfc3339(), "rules": rules, "servers": servers, "config_path": config_path}))
 }
 
@@ -870,7 +870,7 @@ pub fn import_policy(state: State<'_, Arc<AppState>>, policy_json: String) -> Re
         let pattern = rule.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
         if pattern.is_empty() { continue; }
         regex::Regex::new(pattern).map_err(|e| format!("Invalid regex: {}", e))?;
-        let mut engine = state.engine.write().unwrap();
+        let mut engine = state.engine.write().unwrap_or_else(|e| e.into_inner());
         let mut current = engine.list_rules();
         if !current.iter().any(|r| r.pattern == pattern) {
             current.push(RuleEntry { rule_type: rule_type.to_string(), pattern: pattern.to_string(), enabled: true });

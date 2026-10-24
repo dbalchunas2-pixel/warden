@@ -65,6 +65,10 @@ pub async fn classify_tool_call(method: &str, params: &Value, api_key: &str) -> 
     let client = Client::builder()
         .timeout(std::time::Duration::from_secs(8))
         .connect_timeout(std::time::Duration::from_secs(3))
+        .http1_only()
+        .tcp_nodelay(true)
+        .tcp_keepalive(std::time::Duration::from_secs(15))
+        .pool_idle_timeout(std::time::Duration::from_secs(15))
         .build()
         .context("Failed to build HTTP client")?;
 
@@ -81,7 +85,7 @@ pub async fn classify_tool_call(method: &str, params: &Value, api_key: &str) -> 
             Ok(r) => r,
             Err(e) => {
                 if attempt < 3 {
-                    tracing::warn!("Nebius attempt {} network error, retrying: {}", attempt, e);
+                    tracing::warn!("Nebius attempt {} network error, retrying: {:?}", attempt, e);
                     tokio::time::sleep(std::time::Duration::from_millis(400u64 << (attempt - 1))).await;
                     continue;
                 }
@@ -197,6 +201,10 @@ pub async fn call_nemotron(system_prompt: &str, user_msg: &str, api_key: &str) -
     let client = Client::builder()
         .timeout(std::time::Duration::from_secs(20))
         .connect_timeout(std::time::Duration::from_secs(5))
+        .http1_only()
+        .tcp_nodelay(true)
+        .tcp_keepalive(std::time::Duration::from_secs(15))
+        .pool_idle_timeout(std::time::Duration::from_secs(15))
         .build()
         .context("Failed to build HTTP client")?;
     let resp = client
