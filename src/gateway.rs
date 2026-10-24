@@ -35,7 +35,7 @@ fn upstream_url(state: &Arc<AppState>, name: &str) -> Option<String> {
         .map(String::from)
 }
 
-async fn decide(state: &Arc<AppState>, method: &str, params: &Value) -> (bool, String, &'static str) {
+async fn decide(state: &Arc<AppState>, method: &str, params: &Value, trusted: bool) -> (bool, String, &'static str) {
     gwmark!("decide enter method={}", method);
     let decision = {
         let engine = state.engine.read().unwrap_or_else(|e| e.into_inner());
@@ -47,6 +47,10 @@ async fn decide(state: &Arc<AppState>, method: &str, params: &Value) -> (bool, S
             // F5 circuit breaker: after repeated classifier infra failures, go
             // rules-only for a 60s cooldown instead of hard-blocking benign calls.
             let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+            if trusted {
+                gwmark!("decide TRUSTED-OPEN (breaker open)");
+                return (true, "trusted operator: classifier unavailable - allowed WITHOUT LLM decision".into(), "TRUSTED-OPEN");
+            }
             if state.breaker_until_ms.load(std::sync::atomic::Ordering::SeqCst) > now_ms {
                 gwmark!("decide BREAKER OPEN - rules-only mode");
                 (true, "classifier unavailable (circuit breaker open) - rules-only mode, NO LLM DECISION for this call".into(), "OPEN-DEGRADED")
@@ -60,6 +64,10 @@ async fn decide(state: &Arc<AppState>, method: &str, params: &Value) -> (bool, S
                         (allow, format!("{} ({:.2})", c.reasoning, c.confidence), "LLM")
                     }
                     Err(e) => {
+                        if trusted {
+                            gwmark!("decide TRUSTED-OPEN (classifier error)");
+                            return (true, format!("trusted operator: classifier unavailable ({}) - allowed WITHOUT LLM decision", e), "TRUSTED-OPEN");
+                        }
                         let f = state.classifier_fails.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
                         if f >= 3 {
                             state.breaker_until_ms.store(now_ms + 60_000, std::sync::atomic::Ordering::SeqCst);
@@ -130,7 +138,9 @@ async fn handle_connection(state: Arc<AppState>, mut stream: tokio::net::TcpStre
         }};
         let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("").to_string();
         let params = req.get("params").cloned().unwrap_or(json!({}));
-        let (allow, reason, layer) = decide(&state, &method, &params).await;
+        let trusted = state.check_operator(req.get("operator"));
+        gwmark!("operator trusted={}", trusted);
+        let (allow, reason, layer) = decide(&state, &method, &params, trusted).await;
         gwmark!("decided allow={} layer={}", allow, layer);
         state.push_event(&method, &params, if allow {"allowed"} else {"blocked"}, &reason, &format!("CHK-{}-{}", layer, sname));
         gwmark!("push_event done");
@@ -158,7 +168,7 @@ async fn handle_connection(state: Arc<AppState>, mut stream: tokio::net::TcpStre
                 let params = req.get("params").cloned().unwrap_or(json!({}));
                 let id = req.get("id").cloned();
                 let t0 = std::time::Instant::now();
-                let (allow, reason, layer) = decide(&state, &method, &params).await;
+                let (allow, reason, layer) = decide(&state, &method, &params, false).await;
                 state.push_event(&method, &params, if allow {"allowed"} else {"blocked"}, &reason, &format!("GW-{}", layer));
                 let _ms = t0.elapsed().as_millis();
                 if !allow {
@@ -214,7 +224,7 @@ async fn handle_ws(state: Arc<AppState>, stream: tokio::net::TcpStream, name: &s
         let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("").to_string();
         if method == "tools/call" {
             let params = req.get("params").cloned().unwrap_or(json!({}));
-            let (allow, reason, layer) = decide(&state, &method, &params).await;
+            let (allow, reason, layer) = decide(&state, &method, &params, false).await;
             state.push_event(&method, &params, if allow {"allowed"} else {"blocked"}, &reason, &format!("GW-{}", layer));
             if !allow {
                 let id = req.get("id").cloned().unwrap_or(json!(null));

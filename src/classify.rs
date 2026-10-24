@@ -207,13 +207,19 @@ pub async fn call_nemotron(system_prompt: &str, user_msg: &str, api_key: &str) -
         .pool_idle_timeout(std::time::Duration::from_secs(15))
         .build()
         .context("Failed to build HTTP client")?;
-    let resp = client
+    let resp = match client
         .post(format!("{}chat/completions", NEBIUS_BASE_URL))
         .bearer_auth(api_key)
         .json(&payload)
         .send()
         .await
-        .context("Failed to send request to Nebius Token Factory")?;
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("[classify] reqwest send failed ({}), switching to curl transport", e);
+            return nemotron_via_curl(&payload, api_key).await;
+        }
+    };
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
@@ -417,4 +423,58 @@ pub fn assess_posture(rules: usize, llm_enabled: bool, blocked: usize, total: us
         "llm_enabled": llm_enabled,
         "has_password": has_password
     })
+}
+
+
+// F-LLM: curl transport fallback. When the reqwest stack stalls against Nebius
+// (observed as multi-second TimedOut windows while curl succeeds in <1s), retry
+// the identical POST through the system curl binary. The API key travels via a
+// 0600 temp header file, never argv, never logs.
+async fn nemotron_via_curl(payload: &Value, api_key: &str) -> Result<String> {
+    use std::io::Write;
+    use tokio::io::AsyncWriteExt;
+    use std::os::unix::fs::OpenOptionsExt;
+    let hdr_path = std::env::temp_dir().join(format!("warden-hdr-{}", std::process::id()));
+    let mut f = std::fs::OpenOptions::new()
+        .write(true).create(true).truncate(true).mode(0o600)
+        .open(&hdr_path)?;
+    f.write_all(format!("Authorization: Bearer {}", api_key).as_bytes())?;
+    drop(f);
+    let body = serde_json::to_string(payload)?;
+    let t0 = std::time::Instant::now();
+    let child = tokio::process::Command::new("curl")
+        .arg("-sS")
+        .arg("-X").arg("POST")
+        .arg("-H").arg(format!("@{}", hdr_path.display()))
+        .arg("-H").arg("content-type: application/json")
+        .arg("--max-time").arg("30")
+        .arg("--data-binary").arg("@-")
+        .arg(format!("{}chat/completions", NEBIUS_BASE_URL))
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn();
+    let mut child = match child {
+        Ok(c) => c,
+        Err(e) => { let _ = std::fs::remove_file(&hdr_path); anyhow::bail!("curl spawn failed: {}", e); }
+    };
+    if let Some(mut si) = child.stdin.take() {
+        let _ = si.write_all(body.as_bytes()).await;
+        let _ = si.flush().await;
+    }
+    let out = child.wait_with_output().await;
+    let _ = std::fs::remove_file(&hdr_path);
+    let out = out?;
+    if !out.status.success() {
+        anyhow::bail!("curl transport failed ({:?}): {}", t0.elapsed(), String::from_utf8_lossy(&out.stderr));
+    }
+    tracing::info!("[classify] curl transport OK in {:?}", t0.elapsed());
+    let resp_json: Value = serde_json::from_slice(&out.stdout).context("curl transport: bad JSON from Nebius")?;
+    let content = resp_json
+        .get("choices").and_then(|c| c.get(0))
+        .and_then(|c| c.get("message"))
+        .and_then(|m| m.get("content"))
+        .and_then(|c| c.as_str())
+        .context("curl transport: no content in Nebius response")?;
+    Ok(content.to_string())
 }

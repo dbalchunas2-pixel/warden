@@ -185,6 +185,21 @@ impl AppState {
         self.api_key_config.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
+    /// True when the /check caller presented the operator token from warden.toml [trusted].
+    /// The token NEVER bypasses rules - it only changes fail-open behavior when the
+    /// classifier itself is unavailable (trusted operator vs unknown caller).
+    pub fn check_operator(&self, tok: Option<&Value>) -> bool {
+        let Some(t) = tok.and_then(|v| v.as_str()) else { return false };
+        if t.is_empty() { return false }
+        self.config
+            .read().unwrap_or_else(|e| e.into_inner())
+            .get("trusted")
+            .and_then(|s| s.get("operator_token"))
+            .and_then(|v| v.as_str())
+            .map(|secret| secret == t)
+            .unwrap_or(false)
+    }
+
     pub fn upstream_from_config(&self) -> Option<String> {
         self.config
             .read()
