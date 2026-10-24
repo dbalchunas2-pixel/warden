@@ -165,7 +165,7 @@ Single Rust binary, single `.app` bundle, no separate frontend build, no externa
 - `src/classify.rs` — Nebius/Nemotron client (reqwest + curl fallback), 20s timeout, temperature 0 + seeded
 - `src/commands.rs` — Tauri IPC commands (audit, rules, digest, presets, clients, red team, updates)
 - `src/clients.rs` — MCP client config scanner/protector with backup + restore
-- `src/auth.rs` � Argon2id master password + GitHub OAuth device flow
+- `src/auth.rs` — Argon2id master password + GitHub OAuth device flow
 - `ui/index.html` — plain HTML/JS SPA embedded at compile time
 
 Tracing goes to stderr only — stdout carries MCP JSON-RPC, nothing else.
