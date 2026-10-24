@@ -1008,3 +1008,11 @@ pub fn export_digest(state: State<'_, Arc<AppState>>, days: Option<u64>) -> Resu
     let _ = std::process::Command::new("open").arg("-R").arg(&path).spawn();
     Ok(json!({"path": path, "days": days, "total": total, "blocked": blocked, "allowed": allowed, "categories": cs, "top_tools": ts.into_iter().take(10).collect::<Vec<_>>() }))
 }
+
+
+#[tauri::command]
+pub fn relaunch_app(state: State<'_, Arc<AppState>>) {
+    if let Some(h) = state.app_handle.read().unwrap_or_else(|e| e.into_inner()).as_ref() {
+        h.restart();
+    }
+}

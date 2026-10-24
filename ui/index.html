@@ -131,9 +131,23 @@ header { border-bottom:1px solid var(--border); padding:16px 28px; display:flex;
 .set-row input { flex:1; }
 .set-info { font-size:11px; color:var(--dim); line-height:1.8; }
 .set-info b { color:var(--text); }
+.toast-wrap{position:fixed;bottom:20px;right:20px;z-index:99999;display:flex;flex-direction:column;gap:6px}
+.toast{padding:10px 16px;border-radius:6px;font-size:11px;max-width:340px;animation:slideIn 0.3s;box-shadow:0 4px 12px rgba(0,0,0,0.4)}
+.toast.err{background:var(--danger);color:#fff}
+.toast.ok{background:var(--accent);color:var(--bg)}
+.toast.warn{background:var(--warn);color:var(--bg)}
+.toast.fade{opacity:0;transition:opacity 0.4s}
+.pin-btn{background:none;border:1px solid var(--border-hi);color:var(--warn);font-size:8px;padding:2px 6px;border-radius:3px;cursor:pointer;font-family:var(--mono);margin-left:4px}
+.pin-btn:hover{background:var(--warn-d);border-color:var(--warn)}
+.outbreak-badge{font-size:8px;padding:1px 5px;border-radius:2px;background:var(--danger);color:#fff;font-weight:700;animation:pulse 1s infinite}
+.scrubber-bar{display:flex;align-items:center;gap:10px;padding:8px 0;margin-bottom:8px}
+.scrubber-bar input[type=range]{flex:1;height:4px}
+.scrubber-btn{background:var(--panel);border:1px solid var(--border);color:var(--text);padding:4px 12px;border-radius:4px;cursor:pointer;font-family:var(--mono);font-size:10px}
+.scrubber-btn:hover{border-color:var(--accent);color:var(--accent)}
+.scrubber-time{font-size:10px;color:var(--dim);min-width:120px}
 </style>
 </head>
-<body>
+<body><div class="toast-wrap" id="toast-wrap"></div>
 <header>
   <div class="logo"><span class="logo-mark">Warden</span><span class="logo-sub">MCP Security Gateway</span></div>
   <div class="nav" id="nav-groups"></div>
@@ -194,6 +208,13 @@ header { border-bottom:1px solid var(--border); padding:16px 28px; display:flex;
 <div id="setup-scan-results" style="max-height:180px;overflow-y:auto;margin-bottom:8px"></div>
 <div class="setup-sec-title" style="margin-top:22px">4 - Gateway</div><div class="setup-hint" id="setup-api-hint">Checking API key...</div><div class="setup-field"><label>Upstream MCP Server</label><div id="setup-upstream-display" style="font-size:11px;color:var(--dim);padding:8px 0">Pick a detected server above, or <a href="#" onclick="toggleManualUpstream(event)" style="color:var(--accent)">enter a command manually</a></div><input id="setup-upstream" type="hidden"><div id="setup-manual-upstream" style="display:none"><input id="setup-upstream-manual" placeholder="npx some-mcp-server" style="width:100%;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:10px 14px;border-radius:6px;font-family:var(--mono);font-size:12px"></div></div><div class="setup-field"><label>Nebius API Key (optional)</label><input id="setup-key" type="password" placeholder="Leave empty for env var"></div><button onclick="saveSetup()">Save and Start</button><div class="setup-err" id="setup-err"></div></div></div>
 <script>
+function toast(msg,kind){kind=kind||"warn";var w=document.getElementById("toast-wrap");if(!w)return;var t=document.createElement("div");t.className="toast "+kind;t.textContent=msg;w.appendChild(t);setTimeout(function(){t.classList.add("fade");setTimeout(function(){t.remove()},400)},3500)}
+async function pinEntry(btn,e){btn.disabled=true;btn.textContent="Pinning...";try{var r=await invoke("pin_rule",{method:e.method||"",paramsJson:JSON.stringify(e.params||{})});toast("Rule pinned: "+r.type+" = "+r.pattern,"ok");btn.textContent="Pinned!"}catch(ex){toast(String(ex),"err");btn.disabled=false;btn.textContent="Pin Rule"}}
+function addPinBtn(entry,el){if(!entry||dvClass(entry)!=="blocked")return;var btn=document.createElement("button");btn.className="pin-btn";btn.textContent="Pin Rule";btn.onclick=function(){pinEntry(btn,entry)};el.appendChild(btn)}
+var scrubTimer=null,scrubIdx=0,scrubEntries=[]
+function toggleScrub(){if(scrubTimer){clearInterval(scrubTimer);scrubTimer=null;document.getElementById("scrub-play").textContent="Play";return}scrubEntries=(window._auditEntries||[]).slice().reverse();if(!scrubEntries.length){toast("No entries to replay","warn");return}var sl=document.getElementById("scrub-slider");sl.max=scrubEntries.length-1;document.getElementById("scrub-play").textContent="Pause";scrubTimer=setInterval(function(){if(scrubIdx>=scrubEntries.length){clearInterval(scrubTimer);scrubTimer=null;document.getElementById("scrub-play").textContent="Play";return}sl.value=scrubIdx;seekScrub(scrubIdx);scrubIdx++},800)}
+function seekScrub(v){if(!scrubEntries.length)return;var e=scrubEntries[v];if(!e)return;var ts=(e.timestamp||"").slice(11,19);document.getElementById("scrub-time").textContent=ts+" | "+(e.method||"?")+" => "+(e.verdict||"?")}
+async function exportDigest(){try{var r=await invoke("export_digest",{days:7});toast("Digest: "+r.total+" calls, "+r.blocked+" blocked - "+r.path,"ok")}catch(e){toast(String(e),"err")}}
 let entries=[],rules=[],appStatus=null;let invoke;
 const catColors={safe:'var(--accent)',credential_access:'var(--danger)',data_exfiltration:'var(--orange)',destructive:'var(--danger)',prompt_injection:'var(--warn)',privilege_escalation:'var(--orange)',other:'var(--dim)'};
 const catLabels=['safe','credential_access','data_exfiltration','destructive','prompt_injection','privilege_escalation','other'];let sparkData=[];
@@ -209,7 +230,7 @@ function esc(s){const d=document.createElement('div');d.textContent=s;return d.i
 function ingestEntry(e){entries.unshift(e);if(entries.length>200)entries.pop();addFeedEntry(e);updateStats();if(document.getElementById('view-audit').classList.contains('active'))renderAudit();}
 function dvClass(e){const l=(e.layer||'').toUpperCase();if(e.verdict==='blocked'&&l.includes('ERROR'))return'no-decision';if(e.verdict==='allowed'&&l.includes('OPEN-DEGRADED'))return'failed-open';return e.verdict==='allowed'?'allowed':'blocked';}
 function dvLabel(e){const c=dvClass(e);return c==='no-decision'?'NO-DECISION':c==='failed-open'?'FAILED-OPEN':(e.verdict==='allowed'?'ALLOWED':'BLOCKED');}
-function addFeedEntry(entry){const feed=document.getElementById('feed');if(feed.querySelector('.empty'))feed.innerHTML='';const el=document.createElement('div');const v=entry.verdict||'blocked';const isLlm=(entry.layer||'').toUpperCase().includes('LLM');const dc=dvClass(entry),dl=dvLabel(entry);el.className='entry '+dc+(isLlm?' llm':'');const t=entry.timestamp?new Date(entry.timestamp).toLocaleTimeString('en-US',{hour12:false}):'--';el.innerHTML='<div class="entry-time">'+t+'</div><div><div class="entry-method">'+esc(entry.method||'?')+'</div><div class="entry-reason">'+esc(entry.reason||'')+'</div></div><div class="entry-verdict '+dc+'">'+dl+'</div><div class="entry-layer">'+(entry.ms?entry.ms+'ms':'')+'</div>';feed.insertBefore(el,feed.firstChild);while(feed.children.length>100)feed.removeChild(feed.lastChild);}
+function addFeedEntry(entry){const feed=document.getElementById('feed');if(feed.querySelector('.empty'))feed.innerHTML='';const el=document.createElement('div');const v=entry.verdict||'blocked';const isLlm=(entry.layer||'').toUpperCase().includes('LLM');const dc=dvClass(entry),dl=dvLabel(entry);el.className='entry '+dc+(isLlm?' llm':'');const t=entry.timestamp?new Date(entry.timestamp).toLocaleTimeString('en-US',{hour12:false}):'--';el.innerHTML='<div class="entry-time">'+t+'</div><div><div class="entry-method">'+esc(entry.method||'?')+'</div><div class="entry-reason">'+esc(entry.reason||'')+'</div></div><div class="entry-verdict '+dc+'">'+dl+'</div><div class="entry-layer">'+(entry.ms?entry.ms+'ms':'')+'</div>';feed.insertBefore(el,feed.firstChild);addPinBtn(entry,el);if(entry._outbreak){var ob=document.createElement("span");ob.className="outbreak-badge";ob.textContent="OUTBREAK";el.appendChild(ob)}while(feed.children.length>100)feed.removeChild(feed.lastChild);}
 function updateStats(){const total=entries.length,allowed=entries.filter(e=>e.verdict==='allowed').length,blocked=entries.filter(e=>e.verdict==='blocked').length,noDec=entries.filter(e=>dvClass(e)==='no-decision').length,fOpen=entries.filter(e=>dvClass(e)==='failed-open').length,llmCalls=entries.filter(e=>(e.layer||'').toUpperCase().includes('LLM')).length,rate=total?Math.round(blocked/total*100):0;document.getElementById('s-total').textContent=total;document.getElementById('s-allow').textContent=allowed;document.getElementById('s-block').textContent=blocked;document.getElementById('s-nodec').textContent=noDec;document.getElementById('s-fopen').textContent=fOpen;document.getElementById('s-llm').textContent=llmCalls;document.getElementById('s-rate').textContent=rate+'%';document.getElementById('s-rules').textContent=rules.length;const cats={};entries.forEach(e=>{const m=(e.reason||'').match(/category[:\s]+(\w+)/i);const c=e.category||((e.reason||'').split('cat:')[1]||'').trim().split(/[ ,.]/)[0]||(e.verdict==='allowed'?'safe':'other');cats[c]=(cats[c]||0)+1;});const maxC=Math.max(...Object.values(cats),1);let html='';Object.keys(cats).sort((a,b)=>cats[b]-cats[a]).forEach(c=>{const n=cats[c]||0;html+='<div class="chart-row"><span class="chart-label">'+c.replace('privilege_escalation','priv_esc.')+'</span><div class="chart-track"><div class="chart-fill" style="width:'+(n/maxC*100)+'%;background:'+(catColors[c]||'var(--dim)')+'"></div></div><span class="chart-count">'+n+'</span></div>';});document.getElementById('categories').innerHTML=html;sparkData.push(rate);if(sparkData.length>30)sparkData.shift();drawSparkline();}
 function drawSparkline(){const svg=document.getElementById('sparkline');if(sparkData.length<2){svg.innerHTML='';return;}const w=300,h=60;const pts=sparkData.map((v,i)=>(i/(sparkData.length-1))*w+','+(h-(v/100)*h));const path='M'+pts.join(' L');svg.innerHTML='<path d="'+path+' L'+w+','+h+' L0,'+h+' Z" fill="rgba(255,184,0,0.08)"/><path d="'+path+'" stroke="var(--warn)" fill="none" stroke-width="1.5"/>';} 
 window._auditEntries=entries;function renderAudit(){const search=(document.getElementById('audit-search').value||'').toLowerCase(),filter=document.getElementById('audit-filter').value;let filtered=entries.filter(e=>{if(filter&&dvClass(e)!==filter)return false;if(search&&!(e.method||'').toLowerCase().includes(search)&&!(e.reason||'').toLowerCase().includes(search))return false;return true;});let html='';filtered.forEach(e=>{const t=e.timestamp?new Date(e.timestamp).toLocaleTimeString('en-US',{hour12:false}):'--';html+='<tr><td>'+t+'</td><td>'+esc(e.method||'')+'</td><td style="color:var(--dim)">'+esc(e.reason||'')+'</td><td><span class="badge '+dvClass(e)+'">'+dvLabel(e)+'</span></td><td style="color:var(--dim)">'+(e.layer||'').toUpperCase()+'</td>';if(e.verdict==='blocked')html+='<td><button class="export-btn" style="padding:3px 8px;font-size:9px" data-ts="'+e.timestamp+'" onclick="explainBlock(this.dataset.ts,event)">Why?</button></td></tr>';else html+='<td></td></tr>';});document.getElementById('audit-body').innerHTML=html||'<tr><td colspan=6 style="color:var(--dim);padding:30px">No entries</td></tr>';}
@@ -261,8 +282,8 @@ async function protectAll() {
   b.textContent = 'Protecting...'; b.disabled = true;
   try {
     await invoke('protect_all_clients');
-    document.getElementById('client-list').innerHTML = '<div style="color:var(--accent)">Protected. Restart the affected apps to activate.</div>';
-    setTimeout(scanClients, 600);
+    document.getElementById('client-list').innerHTML = '<div style="color:var(--accent)">Protected. Relaunching Warden to activate...</div>';
+    setTimeout(function(){invoke("relaunch_app")},1500);
   } catch (e) { document.getElementById('client-list').textContent = 'Error: ' + e; }
   b.textContent = 'Protect All Clients'; b.disabled = false;
 }
