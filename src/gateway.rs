@@ -35,6 +35,37 @@ fn upstream_url(state: &Arc<AppState>, name: &str) -> Option<String> {
         .map(String::from)
 }
 
+/// Static heuristic layer: real decisions without the LLM. Used whenever the
+/// classifier is unavailable (breaker open, no key, network error) so calls
+/// stop producing "no decision" rows.
+fn heuristic_decide(method: &str, params: &Value) -> Option<(bool, String, &'static str, String)> {
+    if method == "initialize" || method == "ping" || method.starts_with("notifications/")
+        || method == "tools/list" || method == "resources/list" || method == "resources/templates/list"
+        || method == "prompts/list" || method == "completion/complete" || method == "logging/setLevel" {
+        return Some((true, "benign protocol method (static safe-list)".into(), "HEURISTIC", "safe".into()));
+    }
+    if method != "tools/call" { return None; }
+    let s = serde_json::to_string(params).unwrap_or_default();
+    let l = s.to_lowercase();
+    for (pat, cat) in [
+        ("rm -rf", "destructive"), ("mkfs", "destructive"), ("dd if=", "destructive"),
+        ("diskutil erase", "destructive"), ("xrm ", "destructive"), ("history -c", "destructive"),
+        ("id_rsa", "credential_access"), (".ssh", "credential_access"), ("keychain", "credential_access"),
+        (".env", "credential_access"), ("/etc/shadow", "credential_access"), ("gnupg", "credential_access"),
+        (".kube", "credential_access"), ("netrc", "credential_access"),
+        ("sudo ", "privilege_escalation"), ("chmod 777", "privilege_escalation"), ("chown ", "privilege_escalation"),
+        ("launchctl", "privilege_escalation"), ("crontab", "privilege_escalation"),
+        ("curl", "data_exfiltration"), ("wget", "data_exfiltration"), ("/dev/tcp", "data_exfiltration"),
+        ("webhook", "data_exfiltration"), ("| sh", "data_exfiltration"), ("|sh", "data_exfiltration"),
+        ("eval(", "prompt_injection"), ("base64 -d", "prompt_injection"),
+    ] {
+        if l.contains(pat) {
+            return Some((false, format!("heuristic block: '{}' pattern in call", pat), "HEURISTIC", cat.to_string()));
+        }
+    }
+    None
+}
+
 async fn decide(state: &Arc<AppState>, method: &str, params: &Value, trusted: bool) -> (bool, String, &'static str, Option<String>) {
     gwmark!("decide enter method={}", method);
     let decision = {
@@ -42,18 +73,26 @@ async fn decide(state: &Arc<AppState>, method: &str, params: &Value, trusted: bo
         engine.check(method, params)
     };
     match decision {
-        Some(d) => { gwmark!("decide RULES allow={}", d.allow); (d.allow, d.reason, "RULES", None) }
+        Some(d) => {
+            gwmark!("decide RULES allow={}", d.allow);
+            let cat = if d.allow { "safe".to_string() } else { crate::commands::infer_category(&d.reason, "RULES").to_string() };
+            (d.allow, d.reason, "RULES", Some(cat))
+        }
         None => {
             // F5 circuit breaker: after repeated classifier infra failures, go
             // rules-only for a 60s cooldown instead of hard-blocking benign calls.
             let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
             if trusted {
                 gwmark!("decide TRUSTED-OPEN (breaker open)");
-                return (true, "trusted operator: classifier unavailable - allowed WITHOUT LLM decision".into(), "TRUSTED-OPEN", None);
+                let cat = heuristic_decide(method, params).map(|(_, _, _, c)| c);
+                return (true, "trusted operator: classifier unavailable - allowed WITHOUT LLM decision".into(), "TRUSTED-OPEN", cat);
             }
             if state.breaker_until_ms.load(std::sync::atomic::Ordering::SeqCst) > now_ms {
                 gwmark!("decide BREAKER OPEN - rules-only mode");
-                (true, "classifier unavailable (circuit breaker open) - rules-only mode, NO LLM DECISION for this call".into(), "OPEN-DEGRADED", None)
+                match heuristic_decide(method, params) {
+                    Some((a, r, l, c)) => { gwmark!("decide HEURISTIC (breaker open) allow={}", a); (a, r, l, Some(c)) }
+                    None => (true, "classifier unavailable (circuit breaker open) - rules-only mode, NO LLM DECISION for this call".into(), "OPEN-DEGRADED", Some("unclassified".into()))
+                }
             } else {
             match state.api_key() {
                 Some(k) => match state.classify_cached(method, params, &k).await {
@@ -73,11 +112,19 @@ async fn decide(state: &Arc<AppState>, method: &str, params: &Value, trusted: bo
                             state.breaker_until_ms.store(now_ms + 60_000, std::sync::atomic::Ordering::SeqCst);
                             tracing::error!("[breaker] classifier failed {}x consecutively - OPEN for 60s (rules-only mode)", f);
                         }
-                        gwmark!("decide ERROR fail-closed (fail #{})", f);
-                        (false, format!("classifier error: {} (fail closed)", e), "ERROR", None)
+                        if let Some((a, r, l, c)) = heuristic_decide(method, params) {
+                            gwmark!("decide HEURISTIC (classifier error) allow={}", a);
+                            (a, r, l, Some(c))
+                        } else {
+                            gwmark!("decide ERROR fail-closed (fail #{})", f);
+                            (false, format!("classifier error: {} (fail closed)", e), "ERROR", Some("unclassified".into()))
+                        }
                     }
                 },
-                None => { gwmark!("decide NOKEY fail-closed"); (false, "no rule match + no LLM key (fail closed)".into(), "RULES", None) }
+                None => match heuristic_decide(method, params) {
+                    Some((a, r, l, c)) => { gwmark!("decide HEURISTIC (no key) allow={}", a); (a, r, l, Some(c)) }
+                    None => { gwmark!("decide NOKEY fail-closed"); (false, "no rule match + no LLM key (fail closed)".into(), "RULES", Some("unclassified".into())) }
+                }
             }
             }
         }
@@ -126,6 +173,7 @@ async fn handle_connection(state: Arc<AppState>, mut stream: tokio::net::TcpStre
     // Decision-only route: POST /check/<name> with a JSON-RPC body -> {allow, reason, layer}.
     if full_path.starts_with("/check/") {
         let sname = full_path.trim_start_matches("/check/").to_string();
+        state.record_client(&sname);
         if http_method != "POST" {
             gwmark!("route 405");
             write_response(&mut stream, b"HTTP/1.1 405 Method Not Allowed\r\ncontent-length: 0\r\n\r\n").await;
@@ -151,6 +199,7 @@ async fn handle_connection(state: Arc<AppState>, mut stream: tokio::net::TcpStre
         return;
     }
     let name = full_path.trim_start_matches("/mcp/").split('/').next().unwrap_or("").to_string();
+    state.record_client(&name);
     if headers.get("upgrade").map(|v| v.to_lowercase().contains("websocket")).unwrap_or(false) {
         handle_ws(state, stream, &name).await;
         return;

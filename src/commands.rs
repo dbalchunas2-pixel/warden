@@ -519,6 +519,11 @@ pub fn list_servers(state: State<'_, Arc<AppState>>) -> Vec<Value> {
 }
 
 #[tauri::command]
+pub fn list_connected_clients(state: State<'_, Arc<AppState>>) -> Vec<Value> {
+    state.list_clients()
+}
+
+#[tauri::command]
 pub fn add_server(state: State<'_, Arc<AppState>>, name: String, command: String) -> Result<Value, String> {
     gate(&state)?;
     let clean = safe_name(&name);
@@ -1037,7 +1042,7 @@ fn sh_quote(s: &str) -> String {
 
 /// Best-effort category inference for audit entries stored without one
 /// (older RULES-layer blocks wrote a null category).
-fn infer_category(reason: &str, layer: &str) -> &'static str {
+pub(crate) fn infer_category(reason: &str, layer: &str) -> &'static str {
     let h = format!("{} {}", reason, layer).to_lowercase();
     if h.contains("id_rsa") || h.contains(".ssh") || h.contains("credential") || h.contains("shadow")
         || h.contains(".env") || h.contains("netrc") || h.contains("gnupg") || h.contains(".kube")

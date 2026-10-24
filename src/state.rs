@@ -438,6 +438,54 @@ impl AppState {
         }
         Ok(target.display().to_string())
     }
+
+    /// Path of the persistent connected-clients DB (survives restarts, like servers).
+    fn clients_db_path(&self) -> PathBuf {
+        let cur = self.config_path.read().unwrap_or_else(|e| e.into_inner()).clone();
+        let dir = match cur {
+            Some(p) => p.parent().map(|d| d.to_path_buf()).unwrap_or_else(|| PathBuf::from(".")),
+            None => {
+                let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+                PathBuf::from(home).join("Library/Application Support/Warden")
+            }
+        };
+        let _ = std::fs::create_dir_all(&dir);
+        dir.join("clients.json")
+    }
+
+    /// Record a client (by gateway server name) as connected. Persisted to disk.
+    pub fn record_client(&self, name: &str) {
+        if name.is_empty() { return; }
+        let path = self.clients_db_path();
+        let mut db: Value = std::fs::read_to_string(&path).ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_else(|| json!({}));
+        let now = chrono::Utc::now().to_rfc3339();
+        let Some(obj) = db.as_object_mut() else { return };
+        let entry = obj.entry(name.to_string()).or_insert_with(|| json!({"first_seen": now, "connections": 0}));
+        let Some(e) = entry.as_object_mut() else { return };
+        e.insert("last_seen".into(), json!(now));
+        let n = e.get("connections").and_then(|v| v.as_u64()).unwrap_or(0) + 1;
+        e.insert("connections".into(), json!(n));
+        let _ = std::fs::write(&path, serde_json::to_string_pretty(&db).unwrap_or_default());
+    }
+
+    /// List persisted connected clients, most recent first.
+    pub fn list_clients(&self) -> Vec<Value> {
+        let path = self.clients_db_path();
+        let db: Value = std::fs::read_to_string(&path).ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_else(|| json!({}));
+        let mut out: Vec<Value> = db.as_object().map(|o| {
+            o.iter().map(|(k, v)| {
+                let mut e = v.as_object().cloned().unwrap_or_default();
+                e.insert("name".into(), json!(k.clone()));
+                json!(e)
+            }).collect()
+        }).unwrap_or_default();
+        out.sort_by(|a, b| b.get("last_seen").and_then(|v| v.as_str()).unwrap_or("").cmp(&a.get("last_seen").and_then(|v| v.as_str()).unwrap_or("")));
+        out
+    }
 }
 
 fn load_persistent_state(path: &str) -> (HashMap<String, (u64, String)>, CumulativeStats) {

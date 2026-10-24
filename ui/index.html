@@ -177,7 +177,7 @@ header { border-bottom:1px solid var(--border); padding:16px 28px; display:flex;
   </div>
 </div>
 <!-- Red Team -->
-<div class="view" id="view-protect"><div class="content-pad"><div class="section-title">Protect MCP Clients</div><p style="color:var(--dim);font-size:11px;margin-bottom:12px">Route every local MCP client's stdio servers through Warden. Original configs are backed up and fully restorable.</p><div style="display:flex;gap:10px;margin-bottom:12px"><button class="export-btn" onclick="protectAll()" id="protect-btn">Protect All Clients</button><button class="export-btn" onclick="restoreClients()">Restore Backups</button></div><div id="client-list" style="font-size:11px;color:var(--dim)">Click Scan to find installed MCP clients.</div><div style="margin-top:12px"><button class="export-btn" onclick="scanClients()">Scan</button></div></div></div><div class="view" id="view-redteam"><div class="content-pad"><div class="section-title">Attack Simulation</div><p style="color:var(--dim);font-size:11px;margin-bottom:16px">Run 5 pre-scripted attacks through Warden's pipeline. Each increases in sophistication.</p><button class="big-btn" onclick="runRedTeam()" id="redteam-btn">Run All Attacks</button><div id="redteam-results" style="margin-top:16px"></div></div></div>
+<div class="view" id="view-protect"><div class="content-pad"><div class="section-title">Protect MCP Clients</div><p style="color:var(--dim);font-size:11px;margin-bottom:12px">Route every local MCP client's stdio servers through Warden. Original configs are backed up and fully restorable.</p><div style="display:flex;gap:10px;margin-bottom:12px"><button class="export-btn" onclick="protectAll()" id="protect-btn">Protect All Clients</button><button class="export-btn" onclick="restoreClients()">Restore Backups</button></div><div id="client-list" style="font-size:11px;color:var(--dim)">Click Scan to find installed MCP clients.</div><div class="section-title" style="margin-top:18px">Connected Clients (persistent)</div><div id="conn-clients" style="font-size:11px;color:var(--dim)">Loading...</div><div style="margin-top:12px"><button class="export-btn" onclick="scanClients()">Scan</button></div></div></div><div class="view" id="view-redteam"><div class="content-pad"><div class="section-title">Attack Simulation</div><p style="color:var(--dim);font-size:11px;margin-bottom:16px">Run 5 pre-scripted attacks through Warden's pipeline. Each increases in sophistication.</p><button class="big-btn" onclick="runRedTeam()" id="redteam-btn">Run All Attacks</button><div id="redteam-results" style="margin-top:16px"></div></div></div>
 <!-- Discovery -->
 <div class="view" id="view-discovery"><div class="content-pad"><div class="section-title">MCP Auto-Discovery</div><p style="color:var(--dim);font-size:11px;margin-bottom:16px">Scan your filesystem for local MCP servers. Nemotron classifies each candidate.</p><button class="big-btn" onclick="runDiscovery()" id="discovery-btn">Auto-Detect Local MCPs</button><div id="discovery-results" style="margin-top:16px"></div></div></div>
 <!-- Audit -->
@@ -226,7 +226,7 @@ const VLABEL={overview:'Overview',monitor:'Monitor',attack:'Attack Lab',servers:
 function groupOf(n){for(const g in NAV)if(NAV[g].includes(n))return g;return null;}
 function renderNavGroups(){const nav=document.getElementById('nav-groups');nav.innerHTML='';for(const g in NAV){const b=document.createElement('button');b.className='nav-btn';b.dataset.group=g;b.textContent=VLABEL[g];b.onclick=()=>showView(NAV[g][0]);nav.appendChild(b);}}
 function showView(n,b){const g=groupOf(n);document.querySelectorAll('.view').forEach(v=>v.classList.remove('active'));document.querySelectorAll('.nav-btn').forEach(x=>x.classList.remove('active'));document.getElementById('view-'+n).classList.add('active');if(g){document.querySelectorAll('[data-group]').forEach(x=>{if(x.dataset.group===g)x.classList.add('active');});const sn=document.getElementById('subnav');sn.innerHTML='';NAV[g].forEach(v=>{const sb=document.createElement('button');sb.className='sub-btn'+(v===n?' active':'');sb.textContent=VLABEL[v];sb.onclick=()=>showView(v);sn.appendChild(sb);});}
-if(n==='audit')renderAudit();if(n==='timeline')loadTimeline();if(n==='rules')renderRules();if(n==='servers')renderServers();if(n==='baseline')renderBaseline();if(n==='posture')renderPosture();if(n==='security')loadLlmPanel();}
+if(n==='audit')renderAudit();if(n==='timeline')loadTimeline();if(n==='rules')renderRules();if(n==='servers')renderServers();if(n==='baseline')renderBaseline();if(n==='posture')renderPosture();if(n==='security')loadLlmPanel();if(n==='protect')loadConnectedClients();}
 renderNavGroups();showView('overview');
 function esc(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML;}
 function ingestEntry(e){entries.unshift(e);if(entries.length>200)entries.pop();addFeedEntry(e);updateStats();if(document.getElementById('view-audit').classList.contains('active'))renderAudit();}
@@ -289,6 +289,21 @@ async function protectAll() {
     setTimeout(function(){invoke("relaunch_app")},1500);
   } catch (e) { document.getElementById('client-list').textContent = 'Error: ' + e; }
   b.textContent = 'Protect All Clients'; b.disabled = false;
+}
+async function loadConnectedClients(){
+  const box=document.getElementById('conn-clients');
+  if(!box)return;
+  try{
+    const r=await invoke('list_connected_clients');
+    const list=r||[];
+    if(!list.length){box.innerHTML='<span style="color:var(--dim)">No clients have connected through the gateway yet.</span>';return;}
+    let out='';
+    for(const c of list){
+      const ls=(c.last_seen||'').replace('T',' ').slice(0,19);
+      out+='<div style="padding:4px 0;border-bottom:1px solid var(--border)"><b>'+esc(c.name||'?')+'</b> <span style="color:var(--dim)">last '+ls+' - '+(c.connections||0)+' calls - first '+((c.first_seen||'').slice(0,10))+'</span></div>';
+    }
+    box.innerHTML=out;
+  }catch(e){box.textContent='Error: '+e;}
 }
 async function restoreClients() {
   try {
