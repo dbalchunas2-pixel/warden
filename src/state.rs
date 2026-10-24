@@ -265,6 +265,10 @@ impl AppState {
     }
 
     pub fn push_event(&self, method: &str, params: &Value, verdict: &str, reason: &str, layer: &str) {
+        self.push_event_c(method, params, verdict, reason, layer, None)
+    }
+
+    pub fn push_event_c(&self, method: &str, params: &Value, verdict: &str, reason: &str, layer: &str, cat: Option<&str>) {
         let params_str = serde_json::to_string(params).unwrap_or_default();
         let head = params_str.get(..1024).unwrap_or(&params_str);
         let truncated = if params_str.len() > 1024 {
@@ -280,6 +284,7 @@ impl AppState {
             "verdict": verdict,
             "reason": reason,
             "layer": layer,
+            "category": cat,
         });
         if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&self.audit_path) {
             let _ = writeln!(file, "{}", entry);

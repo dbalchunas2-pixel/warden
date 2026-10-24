@@ -897,3 +897,42 @@ pub fn import_policy(state: State<'_, Arc<AppState>>, policy_json: String) -> Re
     }
     Ok(json!({"ok": true, "rules_imported": imported, "servers_imported": servers_imported}))
 }
+
+#[tauri::command]
+pub async fn setup_operator_token(state: tauri::State<'_, Arc<AppState>>, action: String) -> Result<Value, String> {
+    use std::io::Read;
+    let path = state.config_path.read().unwrap_or_else(|e| e.into_inner()).clone()
+        .ok_or_else(|| "no warden.toml path known".to_string())?;
+    let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let cfg: toml::Value = toml::from_str(&text).map_err(|e| format!("config parse: {}", e))?;
+    let existing = cfg.get("trusted").and_then(|t| t.get("operator_token")).and_then(|v| v.as_str()).map(|s| s.to_string());
+    let mask = |tk: &String| format!("{}...{}", &tk[..6.min(tk.len())], &tk[tk.len().saturating_sub(4)..]);
+    if action == "status" {
+        return Ok(json!({"configured": existing.is_some(), "masked": existing.as_ref().map(|t| mask(t)).unwrap_or_default()}));
+    }
+    if action != "create" && action != "rotate" { return Err("action must be status|create|rotate".into()); }
+    if action == "create" && existing.is_some() { return Ok(json!({"configured": true, "masked": mask(existing.as_ref().unwrap()), "existed": true})); }
+    let mut buf = [0u8; 24];
+    std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut buf)).map_err(|e| e.to_string())?;
+    let token: String = buf.iter().map(|b| format!("{:02x}", b)).collect();
+    let q = char::from_u32(34).unwrap();
+    let nl = char::from_u32(10).unwrap();
+    let mut new_text = text.clone();
+    if text.contains("[trusted]") && text.contains("operator_token") {
+        let mut out = String::new();
+        for line in text.lines() {
+            if line.trim_start().starts_with("operator_token") {
+                out.push_str("operator_token = "); out.push(q); out.push_str(&token); out.push(q); out.push(nl);
+            } else { out.push_str(line); out.push(nl); }
+        }
+        new_text = out;
+    } else if text.contains("[trusted]") {
+        let mut s = text; s.push_str("operator_token = "); s.push(q); s.push_str(&token); s.push(q); s.push(nl); new_text = s;
+    } else {
+        let mut s = text; s.push(nl); s.push_str("[trusted]"); s.push(nl); s.push_str("operator_token = "); s.push(q); s.push_str(&token); s.push(q); s.push(nl); new_text = s;
+    }
+    std::fs::write(&path, &new_text).map_err(|e| e.to_string())?;
+    let new_cfg: toml::Value = toml::from_str(&new_text).map_err(|e| e.to_string())?;
+    *state.config.write().unwrap_or_else(|e| e.into_inner()) = new_cfg;
+    Ok(json!({"configured": true, "token": token, "rotated": action == "rotate"}))
+}

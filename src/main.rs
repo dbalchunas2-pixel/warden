@@ -200,7 +200,8 @@ fn main() {
         clients::scan_mcp_clients,
             clients::protect_all_clients,
             clients::restore_clients,
-            ])
+            
+        commands::setup_operator_token,])
         .setup(move |app| {
             use tauri::Emitter;
             setup_state.set_handle(app.handle().clone());
