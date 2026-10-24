@@ -1,6 +1,6 @@
 [package]
 name = "warden"
-version = "0.5.7"
+version = "0.5.8"
 edition = "2021"
 description = "MCP Security Gateway with LLM-Powered Tool Call Classification"
 
