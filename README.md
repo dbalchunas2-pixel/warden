@@ -1,76 +1,41 @@
 # Warden
 
-MCP Security Gateway - LLM-powered tool call classification on Nebius Token Factory with NVIDIA Nemotron.
+MCP Security Gateway — a native Mac app that intercepts every MCP tool call and decides whether it should execute, using deterministic rules, NVIDIA Nemotron LLM classification on Nebius Token Factory, and a fail-closed fallback stack.
 
-Warden is a **native Mac app** (Tauri) that sits between your MCP client (Claude Desktop, Cursor, etc.) and your MCP server, intercepting every `tools/call` through a layered defense pipeline:
+Warden sits between your MCP client (Claude Desktop, Claude Code, Cursor, Windsurf, Cline) and your MCP servers. Every `tools/call` passes through a layered defense pipeline:
 
-1. **Deterministic rules** - regex patterns for known attack vectors (credential paths, destructive commands, data exfiltration). Instant, zero latency.
-2. **LLM classification** - NVIDIA Nemotron on Nebius Token Factory analyzes ambiguous calls the rules don't cover.
-3. **Audit logging** - every decision recorded to JSONL with timestamp, method, params, verdict, and reason.
-
-The stdio proxy and the dashboard are **one application**: the proxy inspects JSON-RPC on stdin/stdout while the native window shows what it's doing in real time over Tauri IPC events.
+1. **Deterministic rules** — regex patterns for known attack vectors (credential paths, destructive commands, exfiltration). Instant, zero latency.
+2. **LLM classification** — NVIDIA Nemotron on Nebius Token Factory analyzes the calls the rules don't cover, with a dynamic threat-category label on every verdict.
+3. **Heuristic fallback** — a static analyzer decides protocol and dangerous-shape calls even when the LLM is unreachable, so no call is left without a decision.
+4. **Fail-closed everything** — classifier outage, missing API key, or rate-limit trip means block (or rules-only mode), never a silent allow.
+5. **Audit logging** — every decision recorded to JSONL with timestamp, method, params, verdict, reason, layer, and category.
 
 ## Install
 
-### Option 1: Build from source (recommended)
+### Option 1: Download the DMG
+
+Grab `Warden_X.Y.Z_aarch64.dmg` from the [latest release](https://github.com/dbalchunas2-pixel/warden/releases/latest), drag **Warden.app** to Applications, and launch.
+
+### Option 2: In-app updates
+
+Once installed, Warden self-updates: **Security tab > Check for Updates**. Releases are minisign-signed; the app verifies, installs, and relaunches itself.
+
+### Option 3: Build from source
 
 ```bash
 git clone https://github.com/dbalchunas2-pixel/warden.git
 cd warden
-./install.sh
-```
-
-This builds the binary, creates the .app bundle, and installs to /Applications.
-
-### Option 2: Manual build with Tauri CLI
-
-```bash
-git clone https://github.com/dbalchunas2-pixel/warden.git
-cd warden
+./install.sh        # builds, bundles, installs to /Applications
+# or:
 npx @tauri-apps/cli@2 build
 open target/release/bundle/macos/Warden.app
 ```
 
-### Option 3: Download DMG
-
-Download `Warden_0.3.0_aarch64.dmg` from a release and drag **Warden.app** to Applications.
-
 ## Quick Start
 
-```bash
-# First run - opens the Warden window with a setup screen
-# (set your upstream MCP server; optionally paste a Nebius API key)
-warden
-
-# Start protecting an MCP server (proxy + live dashboard in one app)
-warden --upstream "node /path/to/mcp-server.js"
-
-# Or use a config file
-warden --config warden.toml
-```
-
-When your MCP client spawns `warden --upstream ...`, the proxy reads the client's requests from stdin and the Warden window opens as the control plane.
-
-## Nebius API Key
-
-Warden uses NVIDIA Nemotron models on Nebius Token Factory for LLM classification.
-
-```bash
-# Get a free key at https://studio.nebius.ai
-export NEBIUS_API_KEY="your-key"
-
-# Persist it
-echo 'export NEBIUS_API_KEY="your-key"' >> ~/.zshrc
-source ~/.zshrc
-```
-
-GUI-launched apps don't inherit shell env vars, so the setup screen also accepts a key directly - it is stored in `warden.toml` under `[nebius] api_key`. Env var wins if both are present.
-
-Without any key, the rule engine still blocks known attacks; unmatched calls are **blocked conservatively**.
-
-## MCP Client Configuration
-
-Point your MCP client at Warden instead of the real server:
+1. Launch Warden. First run shows the setup screen: set your upstream MCP server, optionally paste a Nebius API key, set a master password, and link a GitHub identity.
+2. **Protect > Protect All Clients** rewrites your installed MCP clients' configs to route every stdio server through Warden (originals are backed up to `.warden-backup`, one click restores them).
+3. Or wire a client manually:
 
 ```json
 {
@@ -83,31 +48,64 @@ Point your MCP client at Warden instead of the real server:
 }
 ```
 
-Or with a config file:
+## Two Operation Modes
 
-```json
-{
-  "mcpServers": {
-    "my-server": {
-      "command": "warden",
-      "args": ["--config", "/path/to/warden.toml"]
-    }
-  }
-}
+**stdio proxy** — Warden is the `command` in the client's `mcpServers` entry. It reads JSON-RPC from stdin, inspects every call, and forwards clean traffic to the real server. The native window is the control plane.
+
+**HTTP gateway** — Warden exposes a local gateway on `127.0.0.1:8765` for HTTP/WebSocket MCP transports:
+
+- `POST /check/<server_name>` — decision-only endpoint: `{allow, reason, layer}` for a JSON-RPC body
+- `POST /mcp/<server_name>` — forwarding proxy for HTTP transports
+- WebSocket proxying with the same decision pipeline
+
+Executors like terminal agents can gate every command through `/check/` before running it.
+
+## The Decision Pipeline
+
 ```
+tool call
+   |
+   v
+1. Rule engine (regex, <10ms) .................. allow / block
+2. Nemotron LLM (Nebius Token Factory) ......... verdict + confidence + category
+   |  confidence below threshold = block
+   v
+Fallbacks when the LLM can't answer:
+   - heuristic_decide(): protocol safe-list + dangerous-shape analyzer
+   - circuit breaker: 3 consecutive failures -> 60s rules-only mode
+   - trusted operator token: allow WITHOUT LLM during outages (rules still apply)
+   - anything else: fail closed (blocked)
+   |
+   v
+audit JSONL + live dashboard event
+```
+
+Every audit entry carries a threat category: `safe`, `data_exfiltration`, `destructive`, `credential_access`, `privilege_escalation`, `prompt_injection`, or a free-form label the LLM assigns. Weekly digest export rolls these up per category.
 
 ## Dashboard
 
-The native Warden window has four views:
+- **Overview** — live call feed, stats, threat-category breakdown, block-rate sparkline, system info (LLM budget, classify timeout)
+- **Audit Log** — searchable, filterable table of every decision
+- **Timeline** — chronological scrubber over the audit stream: drag or press Play to replay the day's traffic, with full decision detail (reason, category, one-click pin-to-rule) per entry
+- **Rules** — add, toggle, delete regex rules at runtime, no restart
+- **Baseline** — per-call-count baseline with drift detection
+- **Posture** — security posture summary
+- **Servers** — registry of proxied MCP servers, per-server configs, copy-paste client snippets
+- **Protect** — one-click Protect All across Claude Desktop, Claude Code, Cursor, Windsurf, and Cline (with backups + restore), plus a persistent record of every client that has connected through the gateway
+- **Red Team** — continuous randomized attack simulation through the real pipeline; attacks vary in structure each run and passed attacks are auto-pinned as rules
+- **Tester** — push any method + JSON params through the full pipeline and see the exact verdict, layer, and latency
 
-- **Overview** - live tool call feed, stats (total/allowed/blocked/rate), threat category breakdown, block rate sparkline
-- **Audit Log** - searchable, filterable table of all decisions
-- **Rules** - view, add, and delete regex rules at runtime (takes effect immediately, no restart)
-- **Tester** - run any tool call (method + JSON args) through the full pipeline: rules first, then Nemotron LLM classification
+## Security Model
+
+- **Master password** — Argon2id, hash stored in the macOS Keychain. All mutating operations are gated server-side while locked.
+- **GitHub identity** — OAuth device flow, token in Keychain.
+- **Trusted operator** — a token in `warden.toml [trusted]`, echoed by trusted executors. It never bypasses rules; it only changes outage behavior from fail-closed to allow-without-LLM.
+- **Rate limiting** — token bucket on LLM calls (env-tunable burst/refill); under flood, calls are stopped without spending LLM budget.
+- **Zero default rules** — ships empty; apply a preset (Permissive / Balanced / Paranoid) or add your own.
 
 ## Configuration
 
-Warden looks for a config at `--config <path>`, then `./warden.toml`, then `~/Library/Application Support/Warden/warden.toml`.
+Warden looks for a config at `--config <path>`, then `./warden.toml`, then `~/Library/Application Support/Warden/warden.toml`. Missing sections self-heal on startup.
 
 ```toml
 upstream_command = "node /path/to/mcp-server.js"
@@ -121,40 +119,35 @@ confidence_threshold = 0.7
 [rules]
 block_tools = []
 allow_tools = ["tools/list", "initialize", "notifications/initialized"]
-path_block_patterns = [
-  "/etc/.*",
-  "~/.ssh/.*",
-  ".*\\.ssh/.*",
-  ".*\\.env$",
-  ".*/\\.aws/credentials",
-]
-cmd_block_patterns = [
-  "rm .*-rf .*/",
-  "curl.*\\|.*sh",
-  "dd of=",
-  "chmod 777",
-  "mkfs",
-  "shutdown",
-  "kill -9",
-]
+path_block_patterns = [".*\\.ssh/.*", ".*\\.env$", ".*/\\.aws/credentials"]
+cmd_block_patterns = ["rm .*-rf .*/", "curl.*\\|.*sh", "dd of=", "chmod 777"]
+
+[trusted]
+operator_token = "..."   # enables TRUSTED-OPEN outage mode for token holders
+
+[auth]
+github_client_id = "..." # enables the GitHub identity link
 
 [audit]
 log_path = "./warden-audit.jsonl"
 ```
 
+The API key comes from `NEBIUS_API_KEY` or the config file (env wins). Without any key, rules and heuristics still block known attacks; everything else fails closed.
+
 ## How It Works
 
 ```
-MCP Client (Claude, Cursor)
+MCP Client (Claude, Cursor, ...)
         |
-   stdin | stdout
+   stdin | stdout          (or HTTP / WebSocket to 127.0.0.1:8765)
         v   ^
     Warden (single Tauri app)
-    +- stdio proxy: JSON-RPC in, inspected JSON-RPC out
+    +- stdio proxy / HTTP gateway: every call inspected
     +- rule engine: regex patterns block known attacks instantly
-    +- LLM classifier: Nemotron analyzes ambiguous calls
+    +- LLM classifier: Nemotron verdict + confidence + category
+    +- heuristic fallback + circuit breaker + rate limiter: fail-closed stack
     +- audit log: JSONL with full decision context
-    +- native window: control plane, receives live Tauri events
+    +- native window: live control plane over Tauri IPC
         |
    stdin | stdout
         v   ^
@@ -163,24 +156,19 @@ MCP Client (Claude, Cursor)
 
 ## Architecture
 
-Single Rust binary and single `.app` bundle. No separate frontend build, no external services, no localhost HTTP server.
+Single Rust binary, single `.app` bundle, no separate frontend build, no external services.
 
-- **Proxy** (`src/state.rs`) - reads JSON-RPC from stdin, forwards to the upstream process spawned by Warden, emits `tool-call-event` / `proxy-status` Tauri events for every decision
-- **Rule engine** (`src/rules.rs`) - regex-based pattern matching on tool names, paths, and commands; hot-reloadable at runtime
-- **LLM classifier** (`src/classify.rs`) - sends tool call to Nemotron via the Nebius Token Factory API, parses the JSON verdict, threshold 0.7
-- **Commands** (`src/commands.rs`) - Tauri IPC commands (`get_audit_log`, `get_rules`, `add_rule`, `delete_rule`, `test_tool_call`, `get_stats`, `get_status`, `save_setup`, `start_proxy`) replace the old REST API
-- **Frontend** (`ui/index.html`) - plain HTML/JS SPA embedded into the binary at compile time, calls `invoke()` and listens to proxy events
+- `src/main.rs` — entry, gateway startup, command registration, startup self-test
+- `src/state.rs` — AppState, audit persistence, config management, verdict cache, rate limiting, persistent client registry
+- `src/gateway.rs` — HTTP/WS gateway on 127.0.0.1:8765, decide() pipeline
+- `src/rules.rs` — regex rule engine, hot-relloadable
+- `src/classify.rs` — Nebius/Nemotron client (reqwest + curl fallback), 20s timeout, temperature 0 + seeded
+- `src/commands.rs` — Tauri IPC commands (audit, rules, digest, presets, clients, red team, updates)
+- `src/clients.rs` — MCP client config scanner/protector with backup + restore
+- `src/auth.rs` � Argon2id master password + GitHub OAuth device flow
+- `ui/index.html` — plain HTML/JS SPA embedded at compile time
 
-Tracing goes to stderr only - stdout carries MCP JSON-RPC, nothing else.
-
-## Building from Source
-
-```bash
-git clone https://github.com/dbalchunas2-pixel/warden.git
-cd warden
-cargo build --release                      # binary at target/release/warden
-npx @tauri-apps/cli@2 build                # Warden.app + dmg installer
-```
+Tracing goes to stderr only — stdout carries MCP JSON-RPC, nothing else.
 
 ## Adversarial Evaluation
 
@@ -199,7 +187,7 @@ Latest results (seed 1337, 22 attacks + 6 benign controls):
 - False-positive rate on benign traffic: **0%**
 - Avg latency per verdict: **~3.5s** (rule-level decisions in <10ms)
 
-Flood test (30 back-to-back attacks, tight LLM budget): **30/30 blocked**, with only 3 calls consuming LLM budget — the rest stopped by the rate limiter (fail-closed) or the rule engine. The classifier request itself is hard-capped at a 20s timeout; any failure fails closed.
+Flood test (30 back-to-back attacks, tight LLM budget): **30/30 blocked**, with only 3 calls consuming LLM budget — the rest stopped by the rate limiter (fail-closed) or the rule engine. The classifier request is hard-capped at a 20s timeout; any failure fails closed.
 
 ## License
 
