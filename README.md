@@ -161,7 +161,7 @@ Single Rust binary, single `.app` bundle, no separate frontend build, no externa
 - `src/main.rs` — entry, gateway startup, command registration, startup self-test
 - `src/state.rs` — AppState, audit persistence, config management, verdict cache, rate limiting, persistent client registry
 - `src/gateway.rs` — HTTP/WS gateway on 127.0.0.1:8765, decide() pipeline
-- `src/rules.rs` — regex rule engine, hot-relloadable
+- `src/rules.rs` — regex rule engine, hot-reloadable
 - `src/classify.rs` — Nebius/Nemotron client (reqwest + curl fallback), 20s timeout, temperature 0 + seeded
 - `src/commands.rs` — Tauri IPC commands (audit, rules, digest, presets, clients, red team, updates)
 - `src/clients.rs` — MCP client config scanner/protector with backup + restore
