@@ -44,6 +44,8 @@ pub struct AppState {
     pub unlocked: AtomicBool,
     pub baseline: Mutex<HashMap<String, (u64, String)>>,
     pub cum_stats: Mutex<CumulativeStats>,
+    pub call_windows: Mutex<std::collections::HashMap<String, Vec<u64>>>,
+    pub outbreak_servers: Mutex<std::collections::HashSet<String>>,
 }
 
 impl AppState {
@@ -147,6 +149,8 @@ impl AppState {
             unlocked: AtomicBool::new(false),
             baseline: Mutex::new(baseline),
             cum_stats: Mutex::new(cum_stats),
+            call_windows: Mutex::new(std::collections::HashMap::new()),
+            outbreak_servers: Mutex::new(std::collections::HashSet::new()),
         };
         st.load_audit_history();
         {
@@ -199,6 +203,18 @@ impl AppState {
             .map(|secret| secret == t)
             .unwrap_or(false)
     }
+
+    pub fn record_call_and_check_rate(&self, server: &str) -> bool {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let mut windows = self.call_windows.lock().unwrap_or_else(|e| e.into_inner());
+        let w = windows.entry(server.to_string()).or_insert_with(Vec::new);
+        w.retain(|&ts| now - ts < 10);
+        w.push(now);
+        let is_outbreak = w.len() > 20;
+        if is_outbreak { self.outbreak_servers.lock().unwrap_or_else(|e| e.into_inner()).insert(server.to_string()); }
+        is_outbreak
+    }
+
 
     pub fn upstream_from_config(&self) -> Option<String> {
         self.config

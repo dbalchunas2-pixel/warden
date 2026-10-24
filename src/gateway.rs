@@ -143,6 +143,7 @@ async fn handle_connection(state: Arc<AppState>, mut stream: tokio::net::TcpStre
         let (allow, reason, layer, cat) = decide(&state, &method, &params, trusted).await;
         gwmark!("decided allow={} layer={}", allow, layer);
         state.push_event_c(&method, &params, if allow {"allowed"} else {"blocked"}, &reason, &format!("CHK-{}-{}", layer, sname), cat.as_deref());
+        let _outbreak = state.record_call_and_check_rate(&sname);
         gwmark!("push_event done");
         let payload = json!({"allow": allow, "reason": reason, "layer": layer}).to_string();
         let resp = format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}", payload.len(), payload);

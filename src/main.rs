@@ -201,7 +201,9 @@ fn main() {
             clients::protect_all_clients,
             clients::restore_clients,
             
-        commands::setup_operator_token,])
+        commands::setup_operator_token,
+        commands::pin_rule,
+        commands::export_digest,])
         .setup(move |app| {
             use tauri::Emitter;
             setup_state.set_handle(app.handle().clone());

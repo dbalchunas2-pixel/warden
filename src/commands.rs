@@ -936,3 +936,75 @@ pub async fn setup_operator_token(state: tauri::State<'_, Arc<AppState>>, action
     *state.config.write().unwrap_or_else(|e| e.into_inner()) = new_cfg;
     Ok(json!({"configured": true, "token": token, "rotated": action == "rotate"}))
 }
+
+
+#[tauri::command]
+pub fn pin_rule(state: State<'_, Arc<AppState>>, method: String, params_json: String) -> Result<Value, String> {
+    gate(&state)?;
+    let params: Value = serde_json::from_str(&params_json).unwrap_or(json!({}));
+    let cmd = params.get("command").and_then(|v| v.as_str())
+        .or_else(|| params.get("args").and_then(|a| a.get("command")).and_then(|v| v.as_str()));
+    let path = params.get("path").and_then(|v| v.as_str())
+        .or_else(|| params.get("file").and_then(|v| v.as_str()));
+    let (rule_type, pattern) = if let Some(c) = cmd {
+        ("cmd".to_string(), c.to_string())
+    } else if let Some(p) = path {
+        ("path".to_string(), p.to_string())
+    } else {
+        ("cmd".to_string(), serde_json::to_string(&params).unwrap_or_default().chars().take(200).collect())
+    };
+    let escaped = pattern.replace("|", ".*").replace(" ", ".*");
+    let escaped = escaped.chars().take(200).collect::<String>();
+    add_rule(state, rule_type.clone(), escaped.clone())?;
+    Ok(json!({"ok": true, "type": rule_type, "pattern": escaped}))
+}
+
+#[tauri::command]
+pub fn export_digest(state: State<'_, Arc<AppState>>, days: Option<u64>) -> Result<Value, String> {
+    let raw = std::fs::read_to_string(&state.audit_path).unwrap_or_default();
+    let days = days.unwrap_or(7);
+    let cutoff = chrono::Utc::now() - chrono::Duration::days(days as i64);
+    let mut entries: Vec<Value> = Vec::new();
+    for line in raw.lines() {
+        let line = line.trim(); if line.is_empty() { continue; }
+        if let Ok(v) = serde_json::from_str::<Value>(line) {
+            if let Some(ts) = v.get("timestamp").and_then(|t| t.as_str()) {
+                if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(ts) {
+                    if dt.with_timezone(&chrono::Utc) >= cutoff { entries.push(v); }
+                }
+            }
+        }
+    }
+    let total = entries.len();
+    let blocked = entries.iter().filter(|e| e.get("verdict").and_then(|v| v.as_str()) == Some("blocked")).count();
+    let allowed = entries.iter().filter(|e| e.get("verdict").and_then(|v| v.as_str()) == Some("allowed")).count();
+    let mut cats: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+    let mut tools: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+    for e in &entries {
+        *cats.entry(e.get("category").and_then(|v| v.as_str()).unwrap_or("other").to_string()).or_default() += 1;
+        *tools.entry(e.get("method").and_then(|v| v.as_str()).unwrap_or("?").to_string()).or_default() += 1;
+    }
+    let mut cs: Vec<(String, u64)> = cats.into_iter().collect(); cs.sort_by(|a, b| b.1.cmp(&a.1));
+    let mut ts: Vec<(String, u64)> = tools.into_iter().collect(); ts.sort_by(|a, b| b.1.cmp(&a.1));
+    let mut csv = String::from("metric,value
+");
+    csv += &format!("total_calls,{}
+", total);
+    csv += &format!("total_blocked,{}
+", blocked);
+    csv += &format!("total_allowed,{}
+", allowed);
+    csv += "category_breakdown:
+";
+    for (c, n) in &cs { csv += &format!("  {},{}
+", c, n); }
+    csv += "top_tools:
+";
+    for (t, n) in ts.iter().take(10) { csv += &format!("  {},{}
+", t, n); }
+    let home = std::env::var("HOME").map_err(|_| "no HOME".to_string())?;
+    let path = format!("{}/Desktop/warden-digest-{}d-{}.csv", home, days, chrono::Utc::now().format("%Y%m%d"));
+    std::fs::write(&path, csv).map_err(|e| e.to_string())?;
+    let _ = std::process::Command::new("open").arg("-R").arg(&path).spawn();
+    Ok(json!({"path": path, "days": days, "total": total, "blocked": blocked, "allowed": allowed, "categories": cs, "top_tools": ts.into_iter().take(10).collect::<Vec<_>>() }))
+}
