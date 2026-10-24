@@ -59,28 +59,51 @@ pub async fn classify_tool_call(method: &str, params: &Value, api_key: &str) -> 
         "max_tokens": 4096,
     });
 
-    // Hard timeout: a hung LLM request must never stall the proxy.
-    // The caller treats any error here as a conservative block (fail closed).
+    // Hard timeout per attempt; transient failures (529/5xx/429/network) are
+    // retried with short backoff before the caller fails closed. Attempts stay
+    // bounded so a hung or overloaded LLM never stalls the proxy for long.
     let client = Client::builder()
-        .timeout(std::time::Duration::from_secs(20))
-        .connect_timeout(std::time::Duration::from_secs(5))
+        .timeout(std::time::Duration::from_secs(8))
+        .connect_timeout(std::time::Duration::from_secs(3))
         .build()
         .context("Failed to build HTTP client")?;
-    let resp = client
-        .post(format!("{}chat/completions", NEBIUS_BASE_URL))
-        .bearer_auth(&api_key)
-        .json(&payload)
-        .send()
-        .await
-        .context("Failed to send request to Nebius Token Factory")?;
 
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        anyhow::bail!("Nebius API error {}: {}", status, body);
-    }
-
-    let resp_json: Value = resp.json().await.context("Failed to parse Nebius response")?;
+    let mut attempt: u32 = 0;
+    let resp_json: Value = loop {
+        attempt += 1;
+        let send = client
+            .post(format!("{}chat/completions", NEBIUS_BASE_URL))
+            .bearer_auth(&api_key)
+            .json(&payload)
+            .send()
+            .await;
+        let response = match send {
+            Ok(r) => r,
+            Err(e) => {
+                if attempt < 3 {
+                    tracing::warn!("Nebius attempt {} network error, retrying: {}", attempt, e);
+                    tokio::time::sleep(std::time::Duration::from_millis(400u64 << (attempt - 1))).await;
+                    continue;
+                }
+                return Err(anyhow::anyhow!("Nebius network error after {} attempts: {}", attempt, e));
+            }
+        };
+        let status = response.status();
+        if status.is_success() {
+            match response.json::<Value>().await {
+                Ok(v) => break v,
+                Err(e) => return Err(anyhow::anyhow!("Failed to parse Nebius response: {}", e)),
+            }
+        }
+        let transient = status.as_u16() == 429 || status.is_server_error();
+        let body = response.text().await.unwrap_or_default();
+        if transient && attempt < 3 {
+            tracing::warn!("Nebius attempt {} transient error {}, retrying", attempt, status);
+            tokio::time::sleep(std::time::Duration::from_millis(400u64 << (attempt - 1))).await;
+            continue;
+        }
+        anyhow::bail!("Nebius API error {}: {} (attempts: {})", status, body, attempt);
+    };
 
     let content = resp_json
         .get("choices")

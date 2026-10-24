@@ -104,16 +104,28 @@ fn persist_rules(state: &Arc<AppState>, entries: &[crate::rules::RuleEntry]) -> 
 /// Export the in-memory audit log as CSV to ~/Desktop
 #[tauri::command]
 pub fn export_audit(state: State<'_, Arc<AppState>>) -> Result<Value, String> {
-    let entries: Vec<Value> = state.entries.lock().unwrap().iter().cloned().collect();
+    // Full history from disk, not the capped in-memory buffer.
+    let raw = std::fs::read_to_string(&state.audit_path).unwrap_or_default();
+    let mut entries: Vec<Value> = Vec::new();
+    for line in raw.lines() {
+        let line = line.trim();
+        if line.is_empty() { continue; }
+        if let Ok(v) = serde_json::from_str::<Value>(line) { entries.push(v); }
+    }
+    if !entries.is_empty() {
+        entries.reverse(); // JSONL is append-order; export oldest first
+    }
     if entries.is_empty() {
         return Err("Audit log is empty".into());
     }
+    // Excel/Numbers-friendly: single-line rows, quoted fields, doubled quotes.
     let esc = |v: &Value| -> String {
         let s = v.as_str().unwrap_or(&v.to_string()).to_string();
-        format!("\"{}\"", s.replace('\"', "\"\""))
+        let s = s.replace(['\n', '\r', '\u{0b}', '\u{0c}'], " ");
+        format!("\"{}\"", s.replace('"', "\"\""))
     };
-    let mut csv = String::from("timestamp,ms,method,verdict,layer,category,reason,params\n");
-    for e in entries {
+    let mut csv = String::from("\u{feff}timestamp,ms,method,verdict,layer,category,reason,params\n");
+    for e in &entries {
         csv += &format!("{},{},{},{},{},{},{},{}\n",
             esc(e.get("timestamp").unwrap_or(&json!(""))),
             esc(e.get("ms").unwrap_or(&json!(""))),
@@ -127,7 +139,9 @@ pub fn export_audit(state: State<'_, Arc<AppState>>) -> Result<Value, String> {
     let home = std::env::var("HOME").map_err(|_| "no HOME".to_string())?;
     let path = format!("{}/Desktop/warden-audit-{}.csv", home, chrono::Utc::now().format("%Y%m%d-%H%M%S"));
     std::fs::write(&path, csv).map_err(|e| e.to_string())?;
-    Ok(json!({ "path": path }))
+    // Reveal the file in Finder so it can never get lost.
+    let _ = std::process::Command::new("open").arg("-R").arg(&path).spawn();
+    Ok(json!({ "path": path, "rows": entries.len() }))
 }
 
 #[tauri::command]
