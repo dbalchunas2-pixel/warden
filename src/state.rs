@@ -216,6 +216,26 @@ impl AppState {
     }
 
 
+    pub fn apply_preset(&self, preset: &str) {
+        let patterns: Vec<(&str, Vec<&str>)> = match preset {
+            "paranoid" => vec![("cmd", vec![r"rm\s+.*", r"curl.*\|.*sh", r"wget.*\|.*sh", r"dd\s+of=", r"chmod\s+777", "mkfs", "shutdown", "reboot", "kill", "sudo"]), ("path", vec![r".*\.ssh/.*", r".*\.aws/.*", ".*shadow", r".*\.env", r".*\.netrc", r".*\.gnupg/.*"])],
+            "balanced" => vec![("cmd", vec![r"rm\s+-rf\s+/", r"curl.*\|.*sh", r"wget.*\|.*sh", r"dd\s+of=/dev/sd", "mkfs"]), ("path", vec![r".*\.ssh/id_rsa", r".*\.aws/credentials", "/etc/shadow"])],
+            "permissive" => vec![],
+            _ => vec![],
+        };
+        let mut engine = self.engine.write().unwrap_or_else(|e| e.into_inner());
+        *engine = crate::rules::RuleEngine::from_preset(&patterns);
+    }
+    pub fn apply_preset(&self, preset: &str) {
+        let patterns: Vec<(&str, Vec<&str>)> = match preset {
+            'paranoid' => vec![('cmd', vec!['rm\s+.*', 'curl.*\|.*sh', 'wget.*\|.*sh', 'dd\s+of=', 'chmod\s+777', 'mkfs', 'shutdown', 'reboot', 'kill', 'sudo']), ('path', vec!['.*\.ssh/.*', '.*\.aws/.*', '.*shadow', '.*\.env', '.*\.netrc', '.*\.gnupg/.*'])],
+            'balanced' => vec![('cmd', vec!['rm\s+-rf\s+/', 'curl.*\|.*sh', 'wget.*\|.*sh', 'dd\s+of=/dev/sd', 'mkfs']), ('path', vec!['.*\.ssh/id_rsa', '.*\.aws/credentials', '/etc/shadow'])],
+            'permissive' => vec![],
+            _ => vec![],
+        };
+        let mut engine = self.engine.write().unwrap_or_else(|e| e.into_inner());
+        *engine = crate::rules::RuleEngine::from_preset(&patterns);
+    }
     pub fn upstream_from_config(&self) -> Option<String> {
         self.config
             .read()

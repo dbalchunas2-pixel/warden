@@ -56,6 +56,17 @@ impl RuleEngine {
     }
 
     /// Create from a list of rule entries (used when updating from dashboard)
+    pub fn from_preset(patterns: &[(&str, Vec<&str>)]) -> Self {
+        let mut rules = Vec::new();
+        for (rule_type, pats) in patterns {
+            for p in pats {
+                if let Ok(re) = Regex::new(p) {
+                    rules.push(CompiledRule { rule_type: rule_type.to_string(), pattern: p.to_string(), regex: re, enabled: true });
+                }
+            }
+        }
+        Self { block_tools: vec![], allow_tools: vec![], rules }
+    }
     pub fn from_entries(block_tools: Vec<String>, allow_tools: Vec<String>, entries: &[RuleEntry]) -> Result<Self> {
         let mut rules = Vec::new();
         for e in entries {

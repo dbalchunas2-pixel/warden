@@ -738,7 +738,58 @@ pub async fn run_attack_simulation(
         };
         let sim_reason = format!("[SIM] {}", reason);
         state.push_event_c(method, params, &verdict, &sim_reason, &layer, cat.as_deref());
-        results.push(json!({"level": attack["level"], "name": attack["name"], "description": attack["description"], "method": method, "params": params, "verdict": verdict, "reason": sim_reason, "layer": layer, "ms": t0.elapsed().as_millis() as u64, "category": cat}));
+                                results.push(json!({"level": attack["level"], "name": attack["name"], "description": attack["description"], "method": method, "params": params, "verdict": verdict, "reason": sim_reason, "layer": layer, "ms": t0.elapsed().as_millis() as u64, "category": cat}));
+        if verdict == "allowed" && attack["level"].as_u64().unwrap_or(0) > 0 {
+            let cmd = params.get("command").and_then(|v| v.as_str())
+                .or_else(|| params.get("arguments").and_then(|a| a.get("command")).and_then(|v| v.as_str()));
+            let path = params.get("path").and_then(|v| v.as_str())
+                .or_else(|| params.get("arguments").and_then(|a| a.get("path")).and_then(|v| v.as_str()));
+            let (rt, raw) = if let Some(c) = cmd { ("cmd", c.to_string()) }
+                else if let Some(p) = path { ("path", p.to_string()) }
+                else { ("cmd", serde_json::to_string(params).unwrap_or_default()) };
+            let escaped = regex::escape(&raw);
+            let mut engine = state.engine.write().unwrap_or_else(|e| e.into_inner());
+            *engine = crate::rules::RuleEngine::from_entries(vec![], vec![], &{
+                let mut e = engine.list_rules();
+                e.push(crate::rules::RuleEntry { rule_type: rt.to_string(), pattern: escaped, enabled: true });
+                e
+            });
+            tracing::warn!("[redteam] ATTACK PASSED - auto-pinned rule: {} = {}", rt, escaped);
+        }
+        if verdict == "allowed" && attack["level"].as_u64().unwrap_or(0) > 0 {
+            let cmd = params.get("command").and_then(|v| v.as_str())
+                .or_else(|| params.get("arguments").and_then(|a| a.get("command")).and_then(|v| v.as_str()));
+            let path = params.get("path").and_then(|v| v.as_str())
+                .or_else(|| params.get("arguments").and_then(|a| a.get("path")).and_then(|v| v.as_str()));
+            let (rt, raw) = if let Some(c) = cmd { ("cmd", c.to_string()) }
+                else if let Some(p) = path { ("path", p.to_string()) }
+                else { ("cmd", serde_json::to_string(params).unwrap_or_default()) };
+            let escaped = regex::escape(&raw);
+            let mut engine = state.engine.write().unwrap_or_else(|e| e.into_inner());
+            let mut entries = engine.list_rules();
+            entries.push(crate::rules::RuleEntry { rule_type: rt.to_string(), pattern: escaped.clone(), enabled: true });
+            if let Ok(new_engine) = crate::rules::RuleEngine::from_entries(Vec::new(), Vec::new(), &entries) {
+                *engine = new_engine;
+            }
+            tracing::warn!("[redteam] ATTACK PASSED - auto-pinned rule: {} = {}", rt, escaped.clone());
+        }
+        if verdict == "allowed" && attack["level"].as_u64().unwrap_or(0) > 0 {
+            let cmd = params.get("command").and_then(|v| v.as_str())
+                .or_else(|| params.get("arguments").and_then(|a| a.get("command")).and_then(|v| v.as_str()));
+            let path = params.get("path").and_then(|v| v.as_str())
+                .or_else(|| params.get("arguments").and_then(|a| a.get("path")).and_then(|v| v.as_str()));
+            let (rt, raw) = if let Some(c) = cmd { ("cmd", c.to_string()) }
+                else if let Some(p) = path { ("path", p.to_string()) }
+                else { ("cmd", serde_json::to_string(params).unwrap_or_default()) };
+            let escaped = regex::escape(&raw);
+            let mut engine = state.engine.write().unwrap_or_else(|e| e.into_inner());
+            let mut entries = engine.list_rules();
+            entries.push(crate::rules::RuleEntry { rule_type: rt.to_string(), pattern: escaped.clone(), enabled: true });
+            if let Ok(new_engine) = crate::rules::RuleEngine::from_entries(Vec::new(), Vec::new(), &entries) {
+                *engine = new_engine;
+            }
+            tracing::warn!("[redteam] ATTACK PASSED - auto-pinned rule: {} = {}", rt, escaped.clone());
+        }
     }
     let blocked_count = results.iter().filter(|r| r["verdict"] == "blocked").count();
     let elapsed = t_start.elapsed().as_secs();
@@ -1036,4 +1087,12 @@ pub fn relaunch_app(state: State<'_, Arc<AppState>>) {
     if let Some(h) = state.app_handle.read().unwrap_or_else(|e| e.into_inner()).as_ref() {
         h.restart();
     }
+}
+
+
+#[tauri::command]
+pub fn apply_security_preset(state: State<'_, Arc<AppState>>, preset: String) -> Result<Value, String> {
+    gate(&state)?;
+    state.apply_preset(&preset);
+    Ok(json!({"ok": true, "preset": preset}))
 }

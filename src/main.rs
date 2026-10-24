@@ -204,7 +204,8 @@ fn main() {
         commands::setup_operator_token,
         commands::pin_rule,
         commands::export_digest,
-        commands::relaunch_app,])
+        commands::relaunch_app,
+        commands::apply_security_preset,])
         .setup(move |app| {
             use tauri::Emitter;
             setup_state.set_handle(app.handle().clone());
