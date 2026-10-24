@@ -749,11 +749,11 @@ pub async fn run_attack_simulation(
                 else { ("cmd", serde_json::to_string(params).unwrap_or_default()) };
             let escaped = regex::escape(&raw);
             let mut engine = state.engine.write().unwrap_or_else(|e| e.into_inner());
-            *engine = crate::rules::RuleEngine::from_entries(vec![], vec![], &{
-                let mut e = engine.list_rules();
-                e.push(crate::rules::RuleEntry { rule_type: rt.to_string(), pattern: escaped, enabled: true });
-                e
-            });
+            let mut entries = engine.list_rules();
+            entries.push(crate::rules::RuleEntry { rule_type: rt.to_string(), pattern: escaped.clone(), enabled: true });
+            if let Ok(new_engine) = crate::rules::RuleEngine::from_entries(Vec::new(), Vec::new(), &entries) {
+                *engine = new_engine;
+            }
             tracing::warn!("[redteam] ATTACK PASSED - auto-pinned rule: {} = {}", rt, escaped);
         }
         if verdict == "allowed" && attack["level"].as_u64().unwrap_or(0) > 0 {
