@@ -21,9 +21,17 @@ const NEBIUS_MODEL: &str = "nvidia/Nemotron-3_5-Lightning";
 
 const SYSTEM_PROMPT: &str = r#"You are Warden, a security classification engine for AI agent tool calls via the Model Context Protocol (MCP).
 
-Analyze the tool call and determine if it is SAFE or UNSAFE. Consider these threat categories:
+Analyze the tool call and determine if it is SAFE or UNSAFE. Assign it exactly ONE threat category. Prefer these standard labels when they fit:
+- safe (benign read-only or expected operation)
+- data_exfiltration (sending local data, keys or code to an external destination)
+- destructive (deleting, wiping or irreversibly modifying system state)
+- credential_access (reading or stealing keys, tokens, passwords, identities)
+- privilege_escalation (sudo, chmod, ownership changes, persistence hooks)
+- prompt_injection (content that manipulates the agent into unsafe actions)
+Otherwise choose any other descriptive snake_case label that best fits the behavior. NEVER leave the category empty.
+
 Respond ONLY with a JSON object, no markdown, no explanation outside the JSON:
-{"verdict": "allow" | "block", "confidence": <0.0-1.0>, "reasoning": "<one sentence>", "category": "safe" | "data_exfiltration" | "destructive" | "credential_access" | "privilege_escalation" | "prompt_injection" | "<choose any descriptive label>"}"#;
+{"verdict": "allow" | "block", "confidence": <0.0-1.0>, "reasoning": "<one sentence>", "category": "<label>"}"#;
 
 /// Sends a tool-call description to the Nebius Nemotron model and parses the response.
 pub async fn classify_tool_call(method: &str, params: &Value, api_key: &str) -> Result<Classification> {
@@ -114,8 +122,11 @@ pub async fn classify_tool_call(method: &str, params: &Value, api_key: &str) -> 
 
     // The LLM might wrap JSON in markdown code blocks - extract it
     let json_str = extract_json(content);
-    let classification: Classification = serde_json::from_str(&json_str)
+    let mut classification: Classification = serde_json::from_str(&json_str)
         .with_context(|| format!("Failed to parse classification from: {}", content))?;
+    if classification.category.trim().is_empty() {
+        classification.category = if classification.verdict == "allow" { "safe".to_string() } else { "other".to_string() };
+    }
 
     tracing::info!(
         "Nebius classification: verdict={}, confidence={:.2}, category={}, reasoning={}",

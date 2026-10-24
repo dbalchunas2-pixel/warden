@@ -718,6 +718,26 @@ pub async fn run_attack_simulation(
         state.emit("redteam-progress", &json!({"done": idx + 1, "total": attacks_arr.len(), "name": aname, "elapsed": t_start.elapsed().as_secs()}));
         let method = attack["method"].as_str().unwrap_or("tools/call");
         let params = &attack["params"];
+        // Structural variation: re-wrap the payload each run so the same attack
+        // template exercises different command structures against the engine/LLM.
+        let mut params_v = params.clone();
+        if attack["level"].as_u64().unwrap_or(0) > 0 {
+            if let Some(args) = params_v.get_mut("arguments").and_then(|a| a.as_object_mut()) {
+                if let Some(cmd) = args.get("command").and_then(|v| v.as_str()).map(|s| s.to_string()) {
+                    let seed = (t_start.elapsed().subsec_nanos() as u128)
+                        .wrapping_mul(2654435761)
+                        .wrapping_add(idx as u128 * 7919);
+                    let wrapped = match (seed % 4) as u8 {
+                        0 => cmd.clone(),
+                        1 => format!("sh -c {}", sh_quote(&cmd)),
+                        2 => format!("bash -c {}", sh_quote(&cmd)),
+                        _ => format!("cd /tmp && {}", cmd),
+                    };
+                    args.insert("command".to_string(), json!(wrapped));
+                }
+            }
+        }
+        let params = &params_v;
         let t0 = Instant::now();
         let decision = {
             let engine = state.engine.read().unwrap_or_else(|e| e.into_inner());
@@ -750,47 +770,17 @@ pub async fn run_attack_simulation(
             let escaped = regex::escape(&raw);
             let mut engine = state.engine.write().unwrap_or_else(|e| e.into_inner());
             let mut entries = engine.list_rules();
-            entries.push(crate::rules::RuleEntry { rule_type: rt.to_string(), pattern: escaped.clone(), enabled: true });
-            if let Ok(new_engine) = crate::rules::RuleEngine::from_entries(Vec::new(), Vec::new(), &entries) {
-                *engine = new_engine;
+            if entries.iter().any(|r| r.pattern == escaped) {
+                tracing::debug!("[redteam] auto-pin skipped, rule already pinned");
+            } else {
+                entries.push(crate::rules::RuleEntry { rule_type: rt.to_string(), pattern: escaped.clone(), enabled: true });
+                if let Ok(new_engine) = crate::rules::RuleEngine::from_entries(Vec::new(), Vec::new(), &entries) {
+                    *engine = new_engine;
+                }
+                tracing::warn!("[redteam] ATTACK PASSED - auto-pinned rule: {} = {}", rt, escaped);
             }
-            tracing::warn!("[redteam] ATTACK PASSED - auto-pinned rule: {} = {}", rt, escaped);
         }
-        if verdict == "allowed" && attack["level"].as_u64().unwrap_or(0) > 0 {
-            let cmd = params.get("command").and_then(|v| v.as_str())
-                .or_else(|| params.get("arguments").and_then(|a| a.get("command")).and_then(|v| v.as_str()));
-            let path = params.get("path").and_then(|v| v.as_str())
-                .or_else(|| params.get("arguments").and_then(|a| a.get("path")).and_then(|v| v.as_str()));
-            let (rt, raw) = if let Some(c) = cmd { ("cmd", c.to_string()) }
-                else if let Some(p) = path { ("path", p.to_string()) }
-                else { ("cmd", serde_json::to_string(params).unwrap_or_default()) };
-            let escaped = regex::escape(&raw);
-            let mut engine = state.engine.write().unwrap_or_else(|e| e.into_inner());
-            let mut entries = engine.list_rules();
-            entries.push(crate::rules::RuleEntry { rule_type: rt.to_string(), pattern: escaped.clone(), enabled: true });
-            if let Ok(new_engine) = crate::rules::RuleEngine::from_entries(Vec::new(), Vec::new(), &entries) {
-                *engine = new_engine;
             }
-            tracing::warn!("[redteam] ATTACK PASSED - auto-pinned rule: {} = {}", rt, escaped.clone());
-        }
-        if verdict == "allowed" && attack["level"].as_u64().unwrap_or(0) > 0 {
-            let cmd = params.get("command").and_then(|v| v.as_str())
-                .or_else(|| params.get("arguments").and_then(|a| a.get("command")).and_then(|v| v.as_str()));
-            let path = params.get("path").and_then(|v| v.as_str())
-                .or_else(|| params.get("arguments").and_then(|a| a.get("path")).and_then(|v| v.as_str()));
-            let (rt, raw) = if let Some(c) = cmd { ("cmd", c.to_string()) }
-                else if let Some(p) = path { ("path", p.to_string()) }
-                else { ("cmd", serde_json::to_string(params).unwrap_or_default()) };
-            let escaped = regex::escape(&raw);
-            let mut engine = state.engine.write().unwrap_or_else(|e| e.into_inner());
-            let mut entries = engine.list_rules();
-            entries.push(crate::rules::RuleEntry { rule_type: rt.to_string(), pattern: escaped.clone(), enabled: true });
-            if let Ok(new_engine) = crate::rules::RuleEngine::from_entries(Vec::new(), Vec::new(), &entries) {
-                *engine = new_engine;
-            }
-            tracing::warn!("[redteam] ATTACK PASSED - auto-pinned rule: {} = {}", rt, escaped.clone());
-        }
-    }
     let blocked_count = results.iter().filter(|r| r["verdict"] == "blocked").count();
     let elapsed = t_start.elapsed().as_secs();
     Ok(json!({"results": results, "total": results.len(), "blocked": blocked_count, "all_blocked": blocked_count == results.len(), "elapsed_secs": elapsed, "timed_out": t_start.elapsed() >= deadline}))
@@ -1031,6 +1021,41 @@ pub fn pin_rule(state: State<'_, Arc<AppState>>, method: String, params_json: St
     add_rule(state, "cmd".to_string(), escaped.clone())?;
     Ok(json!({"ok": true, "type": "cmd", "pattern": escaped, "raw": raw}))
 }
+/// Single-double-quote wrapper for shell commands (avoids backslash literals).
+fn sh_quote(s: &str) -> String {
+    let dq = '\u{22}';
+    let esc = '\u{5c}';
+    let mut out = String::new();
+    out.push(dq);
+    for ch in s.chars() {
+        if ch == dq || ch == esc { out.push(esc); }
+        out.push(ch);
+    }
+    out.push(dq);
+    out
+}
+
+/// Best-effort category inference for audit entries stored without one
+/// (older RULES-layer blocks wrote a null category).
+fn infer_category(reason: &str, layer: &str) -> &'static str {
+    let h = format!("{} {}", reason, layer).to_lowercase();
+    if h.contains("id_rsa") || h.contains(".ssh") || h.contains("credential") || h.contains("shadow")
+        || h.contains(".env") || h.contains("netrc") || h.contains("gnupg") || h.contains(".kube")
+        || h.contains("password") || h.contains("secret") { "credential_access" }
+    else if h.contains("rm -rf") || h.contains("dd if") || h.contains("mkfs") || h.contains("/dev/sd")
+        || h.contains("chmod 777") || h.contains("shutdown") || h.contains("reboot")
+        || h.contains("history -c") || h.contains("wipe") { "destructive" }
+    else if h.contains("curl") || h.contains("wget") || h.contains("exfil") || h.contains("webhook")
+        || h.contains("attacker") || h.contains("| sh") || h.contains("|sh") || h.contains("http")
+        || h.contains("nslookup") || h.contains("urlopen") || h.contains("/dev/tcp") { "data_exfiltration" }
+    else if h.contains("sudo") || h.contains("/etc/") || h.contains("chmod") || h.contains("chown")
+        || h.contains("launchctl") || h.contains("crontab") || h.contains("zshrc") || h.contains("bashrc") { "privilege_escalation" }
+    else if h.contains("eval") || h.contains("base64") || h.contains("xxd") || h.contains("printf")
+        || h.contains("inject") || h.contains("dropper") || h.contains("staged") { "prompt_injection" }
+    else if h.contains("no rule") || h.contains("no api") || h.contains("err:") { "no_decision" }
+    else { "other" }
+}
+
 #[tauri::command]
 pub fn export_digest(state: State<'_, Arc<AppState>>, days: Option<u64>) -> Result<Value, String> {
     let raw = std::fs::read_to_string(&state.audit_path).unwrap_or_default();
@@ -1053,7 +1078,11 @@ pub fn export_digest(state: State<'_, Arc<AppState>>, days: Option<u64>) -> Resu
     let mut cats: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
     let mut tools: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
     for e in &entries {
-        *cats.entry(e.get("category").and_then(|v| v.as_str()).unwrap_or("other").to_string()).or_default() += 1;
+        let stored = e.get("category").and_then(|v| v.as_str()).map(|s| s.trim()).filter(|s| !s.is_empty());
+        let reason = e.get("reason").and_then(|v| v.as_str()).unwrap_or("");
+        let layer = e.get("layer").and_then(|v| v.as_str()).unwrap_or("");
+        let cat = match stored { Some(s) => s.to_string(), None => infer_category(reason, layer).to_string() };
+        *cats.entry(cat).or_default() += 1;
         *tools.entry(e.get("method").and_then(|v| v.as_str()).unwrap_or("?").to_string()).or_default() += 1;
     }
     let mut cs: Vec<(String, u64)> = cats.into_iter().collect(); cs.sort_by(|a, b| b.1.cmp(&a.1));
