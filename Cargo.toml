@@ -10,6 +10,8 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 futures-util = "0.3"
+base64 = "0.22"
+hex = "0.4"
 tauri = { version = "2", features = [] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
