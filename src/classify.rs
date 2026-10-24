@@ -19,6 +19,21 @@ pub struct Classification {
 const NEBIUS_BASE_URL: &str = "https://api.tokenfactory.nebius.com/v1/";
 const NEBIUS_MODEL: &str = "nvidia/Nemotron-3_5-Lightning";
 
+/// LLM intelligence tiers. Each tier runs a strictly stronger NVIDIA Nemotron
+/// model on Nebius Token Factory and unlocks new capabilities.
+pub const TIER_MODELS: [&str; 3] = [
+    "nvidia/Nemotron-3_5-Lightning",        // 30B MoE (3B active), 1M ctx
+    "nvidia/nemotron-3-super-120b-a12b",    // 120B MoE (12B active), 256K ctx
+    "nvidia/Nemotron-3-Ultra-550b-a55b",    // 550B MoE (55B active), 1M ctx
+];
+pub const TIER_NAMES: [&str; 3] = ["SCOUT", "SENTINEL", "ULTRA"];
+
+pub fn tier_model(tier: u8) -> &'static str {
+    TIER_MODELS.get(tier as usize).copied().unwrap_or(TIER_MODELS[0])
+}
+pub fn tier_name(tier: u8) -> &'static str {
+    TIER_NAMES.get(tier as usize).copied().unwrap_or(TIER_NAMES[0])
+}
 const SYSTEM_PROMPT: &str = r#"You are Warden, a security classification engine for AI agent tool calls via the Model Context Protocol (MCP).
 
 Analyze the tool call and determine if it is SAFE or UNSAFE. Assign it exactly ONE threat category. Prefer these standard labels when they fit:
@@ -34,7 +49,7 @@ Respond ONLY with a JSON object, no markdown, no explanation outside the JSON:
 {"verdict": "allow" | "block", "confidence": <0.0-1.0>, "reasoning": "<one sentence>", "category": "<label>"}"#;
 
 /// Sends a tool-call description to the Nebius Nemotron model and parses the response.
-pub async fn classify_tool_call(method: &str, params: &Value, api_key: &str) -> Result<Classification> {
+pub async fn classify_once(method: &str, params: &Value, api_key: &str, model: &str, seed: u64, session_ctx: Option<&str>) -> Result<Classification> {
 
     // Truncate large argument blobs to 4 KB to stay within token limits.
     let mut args_str = serde_json::to_string(params).unwrap_or_default();
@@ -44,19 +59,22 @@ pub async fn classify_tool_call(method: &str, params: &Value, api_key: &str) -> 
         args_str.push_str("...[truncated]");
     }
 
-    let user_msg = format!(
+    let mut user_msg = format!(
         "Classify this MCP tool call:\n\nMethod: {}\nArguments: {}\n\nIs this tool call safe to execute? Respond with JSON only.",
         method, args_str
     );
+    if let Some(ctx) = session_ctx {
+        user_msg.push_str(ctx);
+    }
 
     let payload = serde_json::json!({
-        "model": NEBIUS_MODEL,
+        "model": model,
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_msg}
         ],
         "temperature": 0.0,
-        "seed": 42,
+        "seed": seed,
         "max_tokens": 4096,
     });
 
@@ -192,8 +210,12 @@ mod tests {
 /// Generic chat completion call to Nebius Token Factory.
 /// Returns the raw text content from the model.
 pub async fn call_nemotron(system_prompt: &str, user_msg: &str, api_key: &str) -> Result<String> {
+    call_nemotron_model(system_prompt, user_msg, api_key, NEBIUS_MODEL).await
+}
+
+pub async fn call_nemotron_model(system_prompt: &str, user_msg: &str, api_key: &str, model: &str) -> Result<String> {
     let payload = serde_json::json!({
-        "model": NEBIUS_MODEL,
+        "model": model,
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_msg}
@@ -259,7 +281,7 @@ what the potential risk was, and what a safe alternative might look like. Keep i
 }
 
 // ─── Feature 2: Natural-language Rule Synthesis ────────────────────────────
-pub async fn synthesize_rule(description: &str, api_key: &str) -> Result<Value> {
+pub async fn synthesize_rule(description: &str, api_key: &str, model: &str) -> Result<Value> {
     let system = r#"You are Warden, a security rule engine for MCP (Model Context Protocol) tool calls.
 
 The operator describes a security policy in plain English. You convert it into a deterministic regex rule that Warden can enforce locally without any LLM call.
@@ -283,7 +305,7 @@ Guidelines:
         "Convert this security policy into a Warden regex rule:\n\n\"{}\"\n\nRespond with JSON only.",
         description
     );
-    let content = call_nemotron(system, &user, api_key).await?;
+    let content = call_nemotron_model(system, &user, api_key, model).await?;
     let json_str = extract_json(&content);
     let parsed: Value = serde_json::from_str(&json_str)
         .with_context(|| format!("Failed to parse synthesized rule from: {}", content))?;
@@ -481,4 +503,77 @@ async fn nemotron_via_curl(payload: &Value, api_key: &str) -> Result<String> {
         .and_then(|c| c.as_str())
         .context("curl transport: no content in Nebius response")?;
     Ok(content.to_string())
+}
+
+// ─── Intelligence Tier features ───────────────────────────────────────────
+
+/// SENTINEL+ feature: ask the model to decode obfuscated payloads before
+/// classification, so evasion-grade attacks lose their camouflage.
+async fn deobfuscate_payload(method: &str, params: &Value, api_key: &str, model: &str) -> Option<String> {
+    let s = serde_json::to_string(params).unwrap_or_default();
+    let l = s.to_lowercase();
+    let looks_encoded = l.contains("base64") || l.contains("base 64") || l.contains("\\x")
+        || l.contains("%3d") || l.contains("%2f") || l.contains("eval(")
+        || s.matches("\\u").count() > 8;
+    if !looks_encoded { return None; }
+    let sample: String = s.chars().take(2048).collect();
+    let system = "You are a payload decoder. Decode any base64, hex, URL-encoding, unicode escapes or shell obfuscation in the given tool call. Respond ONLY with the decoded plaintext payload, no explanation. If nothing is encoded, respond with exactly: NONE";
+    let user = format!("Method: {}\n\nTool call arguments:\n{}", method, sample);
+    match call_nemotron_model(system, &user, api_key, model).await {
+        Ok(content) => {
+            let t = content.trim().to_string();
+            if t.is_empty() || t == "NONE" { None } else { Some(t.chars().take(4096).collect()) }
+        }
+        Err(_) => None,
+    }
+}
+
+/// Tier-aware classification entry point.
+/// - tier 0 (SCOUT): single-shot classification
+/// - tier 1 (SENTINEL): + payload deobfuscation pre-pass, + 3-vote consensus when confidence is low
+/// - tier 2 (ULTRA): + session-context analysis (recent audit tail passed to the model)
+pub async fn classify_with_tier(method: &str, params: &Value, api_key: &str, tier: u8, threshold: f64, session_ctx: Option<String>) -> Result<Classification> {
+    let model = tier_model(tier);
+
+    let mut effective = params.clone();
+    if tier >= 1 {
+        if let Some(decoded) = deobfuscate_payload(method, params, api_key, model).await {
+            if let Some(obj) = effective.as_object_mut() {
+                obj.insert("_decoded_payload".to_string(), serde_json::json!(decoded));
+            }
+        }
+    }
+
+    let ctx: Option<&str> = if tier >= 2 { session_ctx.as_deref() } else { None };
+    let mut c = classify_once(method, &effective, api_key, model, 42, ctx).await?;
+
+    // SENTINEL+: consensus voting on low-confidence verdicts. Only upgrades
+    // allow -> block on majority; a block is never downgraded (fail-closed).
+    if tier >= 1 && c.confidence < threshold {
+        let mut block_votes = if c.verdict == "block" { 1usize } else { 0usize };
+        let mut total_votes = 1usize;
+        for seed in [43u64, 44u64] {
+            if let Ok(v) = classify_once(method, &effective, api_key, model, seed, None).await {
+                if v.verdict == "block" { block_votes += 1; }
+                if c.category.trim().is_empty() && !v.category.trim().is_empty() {
+                    c.category = v.category.clone();
+                }
+                total_votes += 1;
+            }
+        }
+        if block_votes * 2 > total_votes && c.verdict != "block" {
+            c.verdict = "block".to_string();
+            c.confidence = (c.confidence + 0.2).min(0.99);
+            c.reasoning = format!("[consensus {}/{} block] {}", block_votes, total_votes, c.reasoning);
+        } else if block_votes > 1 {
+            c.reasoning = format!("[consensus {}/{} block] {}", block_votes, total_votes, c.reasoning);
+        } else {
+            c.reasoning = format!("[consensus {}/{} split - fail-closed kept] {}", block_votes, total_votes, c.reasoning);
+        }
+    }
+
+    if c.category.trim().is_empty() {
+        c.category = if c.verdict == "allow" { "safe".to_string() } else { "other".to_string() };
+    }
+    Ok(c)
 }

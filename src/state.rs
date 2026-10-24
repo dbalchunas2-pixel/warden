@@ -33,6 +33,9 @@ pub struct AppState {
     pub last_notify: Mutex<std::time::Instant>,
     pub llm_bucket: Mutex<TokenBucket>,
     verdict_cache: Mutex<HashMap<u64, crate::classify::Classification>>,
+    /// Selected intelligence tier (0 SCOUT, 1 SENTINEL, 2 ULTRA).
+    /// u8::MAX means "not yet read from config".
+    pub llm_tier: std::sync::atomic::AtomicU8,
     pub discovery_cache: Mutex<HashMap<String, serde_json::Value>>,
     pub config: RwLock<toml::Value>,
     pub config_path: RwLock<Option<PathBuf>>,
@@ -142,6 +145,7 @@ impl AppState {
             last_notify: Mutex::new(std::time::Instant::now()),
             llm_bucket: Mutex::new(TokenBucket::new()),
             verdict_cache: Mutex::new(HashMap::new()),
+            llm_tier: std::sync::atomic::AtomicU8::new(u8::MAX),
             discovery_cache: Mutex::new(HashMap::new()),
             upstream_cmd: RwLock::new(upstream),
             proxy_status: RwLock::new("idle".into()),
@@ -256,17 +260,53 @@ impl AppState {
 
     /// Deterministic classification: identical (method, params) always gets
     /// the same verdict within a session - no re-rolling the LLM dice.
+    /// Current intelligence tier, lazily loaded from [nebius].tier in config.
+    pub fn tier(&self) -> u8 {
+        let stored = self.llm_tier.load(std::sync::atomic::Ordering::Relaxed);
+        if stored != u8::MAX { return stored; }
+        let t = self.config.read().unwrap_or_else(|e| e.into_inner())
+            .get("nebius").and_then(|n| n.get("tier")).and_then(|v| v.as_str())
+            .map(|s| match s { "sentinel" => 1u8, "ultra" => 2, _ => 0 })
+            .unwrap_or(0);
+        self.llm_tier.store(t, std::sync::atomic::Ordering::Relaxed);
+        t
+    }
+
+    pub fn set_tier(&self, t: u8) {
+        self.llm_tier.store(t, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn clear_verdict_cache(&self) {
+        self.verdict_cache.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    }
+
     pub async fn classify_cached(&self, method: &str, params: &Value, api_key: &str) -> Result<crate::classify::Classification> {
         use std::hash::{Hash, Hasher};
+        let tier = self.tier();
         let mut h = std::collections::hash_map::DefaultHasher::new();
         method.hash(&mut h);
         serde_json::to_string(params).unwrap_or_default().hash(&mut h);
+        tier.hash(&mut h);
         let k = h.finish();
         if let Some(c) = self.verdict_cache.lock().unwrap_or_else(|e| e.into_inner()).get(&k) {
             tracing::info!("Verdict cache hit for {} (deterministic)", method);
             return Ok(c.clone());
         }
-        let c = crate::classify::classify_tool_call(method, params, api_key).await?;
+        // ULTRA feature: session-context analysis over the recent audit tail.
+        let session_ctx = if tier >= 2 {
+            let ev = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+            let tail: Vec<String> = ev.iter().rev().take(20).map(|e| {
+                let m = e.get("method").and_then(|v| v.as_str()).unwrap_or("?");
+                let v = e.get("verdict").and_then(|v| v.as_str()).unwrap_or("?");
+                let r: String = e.get("reason").and_then(|v| v.as_str()).unwrap_or("").chars().take(80).collect();
+                format!("{} -> {} ({})", m, v, r)
+            }).collect();
+            if tail.is_empty() { None } else {
+                Some(format!("\n\nRecent session context (most recent call last). Use it to detect multi-step or staged attacks where this single call alone looks benign:\n{}", tail.into_iter().rev().collect::<Vec<_>>().join("\n")))
+            }
+        } else { None };
+        let threshold = self.confidence_threshold;
+        let c = crate::classify::classify_with_tier(method, params, api_key, tier, threshold, session_ctx).await?;
         self.verdict_cache.lock().unwrap_or_else(|e| e.into_inner()).insert(k, c.clone());
         Ok(c)
     }

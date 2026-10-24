@@ -183,6 +183,8 @@ fn main() {
             commands::oauth_check,
             commands::list_servers,
             commands::list_connected_clients,
+            commands::get_tier_info,
+            commands::set_llm_tier,
             commands::add_server,
             commands::remove_server,
             commands::client_snippet,

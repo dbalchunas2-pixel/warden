@@ -524,6 +524,66 @@ pub fn list_connected_clients(state: State<'_, Arc<AppState>>) -> Vec<Value> {
 }
 
 #[tauri::command]
+pub fn get_tier_info(state: State<'_, Arc<AppState>>) -> Value {
+    let tier = state.tier();
+    let catalog = serde_json::json!([
+        {"tier": 0, "name": "SCOUT", "model": crate::classify::TIER_MODELS[0],
+         "spec": "Nemotron-3.5-Lightning - 30B MoE (3B active) - 1M context",
+         "price": "$0.06 in / $0.24 out per 1M tokens",
+         "features": [
+            {"name": "Single-shot classification", "desc": "Every call gets a fast Nemotron verdict with category", "unlocked": true},
+            {"name": "Dynamic threat categories", "desc": "LLM picks any descriptive category label", "unlocked": true}
+         ]},
+        {"tier": 1, "name": "SENTINEL", "model": crate::classify::TIER_MODELS[1],
+         "spec": "Nemotron-3-Super-120B - 120B MoE (12B active) - 256K context",
+         "price": "$0.30 in / $0.90 out per 1M tokens",
+         "features": [
+            {"name": "Consensus verdicts", "desc": "Low-confidence calls get 3-vote majority voting - kills single-shot false allows", "unlocked": tier >= 1},
+            {"name": "Payload deobfuscation", "desc": "Base64/hex/URL-encoded payloads are decoded before classification - catches evasion-grade attacks", "unlocked": tier >= 1}
+         ]},
+        {"tier": 2, "name": "ULTRA", "model": crate::classify::TIER_MODELS[2],
+         "spec": "Nemotron-3-Ultra-550B - 550B MoE (55B active) - 1M context",
+         "price": "$1.00 in / $3.00 out per 1M tokens",
+         "features": [
+            {"name": "Session-context analysis", "desc": "The last 20 calls are passed to the model - detects multi-step and staged attacks where each call alone looks benign", "unlocked": tier >= 2},
+            {"name": "LLM rule synthesis", "desc": "Describe a policy in plain English and the strongest model converts it into a generalized regex rule", "unlocked": tier >= 2}
+         ]}
+    ]);
+    serde_json::json!({
+        "tier": tier,
+        "name": crate::classify::tier_name(tier),
+        "model": crate::classify::tier_model(tier),
+        "catalog": catalog,
+    })
+}
+
+#[tauri::command]
+pub fn set_llm_tier(state: State<'_, Arc<AppState>>, tier: u8) -> Result<Value, String> {
+    gate(&state)?;
+    if tier > 2 {
+        return Err("Unknown tier (0 = SCOUT, 1 = SENTINEL, 2 = ULTRA)".to_string());
+    }
+    state.set_tier(tier);
+    state.clear_verdict_cache();
+    // Persist to [nebius].tier in the active config file, like persist_rules.
+    let path = state.config_path.read().unwrap_or_else(|e| e.into_inner()).as_ref().map(|p| p.display().to_string());
+    if let Some(path) = path {
+        let content = std::fs::read_to_string(&path).unwrap_or_default();
+        let mut cfg: toml::Value = content.parse().unwrap_or(toml::Value::Table(Default::default()));
+        if let Some(t) = cfg.as_table_mut() {
+            let nb = t.entry("nebius").or_insert_with(|| toml::Value::Table(Default::default()));
+            if let Some(nt) = nb.as_table_mut() {
+                nt.insert("tier".to_string(), toml::Value::String(crate::classify::tier_name(tier).to_lowercase()));
+            }
+        }
+        std::fs::write(&path, toml::to_string_pretty(&cfg).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
+    }
+    tracing::warn!("[tier] intelligence tier set to {} ({})", tier, crate::classify::tier_name(tier));
+    Ok(serde_json::json!({"tier": tier, "name": crate::classify::tier_name(tier)}))
+}
+
+#[tauri::command]
 pub fn add_server(state: State<'_, Arc<AppState>>, name: String, command: String) -> Result<Value, String> {
     gate(&state)?;
     let clean = safe_name(&name);
@@ -626,10 +686,13 @@ pub async fn synthesize_rule(
     description: String,
 ) -> Result<Value, String> {
     gate(&state)?;
+    if state.tier() < 2 {
+        return Err("Rule synthesis is an ULTRA tier feature. Switch to the ULTRA tier (Nemotron-3-Ultra-550B) in Security to unlock it.".to_string());
+    }
     let key = state.api_key().ok_or_else(|| {
         "No Nebius API key configured. Add it in Security or setup to use LLM features.".to_string()
     })?;
-    let result = crate::classify::synthesize_rule(&description, &key)
+    let result = crate::classify::synthesize_rule(&description, &key, crate::classify::tier_model(state.tier()))
         .await
         .map_err(|e| e.to_string())?;
     // Validate the regex before returning
