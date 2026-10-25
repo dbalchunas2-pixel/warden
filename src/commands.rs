@@ -236,7 +236,7 @@ pub fn get_status(state: State<'_, Arc<AppState>>) -> Value {
     let config_path = state
         .config_path
         .read()
-        .unwrap()
+        .unwrap_or_else(|e| e.into_inner())
         .as_ref()
         .map(|p| p.display().to_string());
     let (bucket_tokens, bucket_burst, bucket_refill) = {
@@ -287,7 +287,7 @@ pub fn start_proxy(state: State<'_, Arc<AppState>>) -> Result<Value, String> {
     let upstream = state
         .upstream_cmd
         .read()
-        .unwrap()
+        .unwrap_or_else(|e| e.into_inner())
         .clone()
         .or_else(|| state.upstream_from_config());
     match upstream {
@@ -360,7 +360,7 @@ fn oauth_client_id(state: &Arc<AppState>) -> Option<String> {
     state
         .config
         .read()
-        .unwrap()
+        .unwrap_or_else(|e| e.into_inner())
         .get("auth")
         .and_then(|a| a.get("github_client_id"))
         .and_then(|v| v.as_str())
@@ -1155,22 +1155,14 @@ pub fn export_digest(state: State<'_, Arc<AppState>>, days: Option<u64>) -> Resu
     }
     let mut cs: Vec<(String, u64)> = cats.into_iter().collect(); cs.sort_by(|a, b| b.1.cmp(&a.1));
     let mut ts: Vec<(String, u64)> = tools.into_iter().collect(); ts.sort_by(|a, b| b.1.cmp(&a.1));
-    let mut csv = String::from("metric,value
-");
-    csv += &format!("total_calls,{}
-", total);
-    csv += &format!("total_blocked,{}
-", blocked);
-    csv += &format!("total_allowed,{}
-", allowed);
-    csv += "category_breakdown:
-";
-    for (c, n) in &cs { csv += &format!("  {},{}
-", c, n); }
-    csv += "top_tools:
-";
-    for (t, n) in ts.iter().take(10) { csv += &format!("  {},{}
-", t, n); }
+    let mut csv = String::from("metric,value\n");
+    csv += &format!("total_calls,{}\n", total);
+    csv += &format!("total_blocked,{}\n", blocked);
+    csv += &format!("total_allowed,{}\n", allowed);
+    csv += "category_breakdown:\n";
+    for (c, n) in &cs { csv += &format!("  {},{}\n", c, n); }
+    csv += "top_tools:\n";
+    for (t, n) in ts.iter().take(10) { csv += &format!("  {},{}\n", t, n); }
     let home = std::env::var("HOME").map_err(|_| "no HOME".to_string())?;
     let path = format!("{}/Desktop/warden-digest-{}d-{}.csv", home, days, chrono::Utc::now().format("%Y%m%d"));
     std::fs::write(&path, csv).map_err(|e| e.to_string())?;
