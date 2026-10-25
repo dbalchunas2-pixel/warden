@@ -91,7 +91,7 @@ async fn decide(state: &Arc<AppState>, method: &str, params: &Value, trusted: bo
                 gwmark!("decide BREAKER OPEN - rules-only mode");
                 match heuristic_decide(method, params) {
                     Some((a, r, l, c)) => { gwmark!("decide HEURISTIC (breaker open) allow={}", a); (a, r, l, Some(c)) }
-                    None => (true, "classifier unavailable (circuit breaker open) - rules-only mode, NO LLM DECISION for this call".into(), "OPEN-DEGRADED", Some("unclassified".into()))
+                    None => (true, "classifier unavailable (circuit breaker open) - rules-only mode, NO LLM DECISION for this call".into(), "OPEN-DEGRADED", Some("other".into()))
                 }
             } else {
             match state.api_key() {
@@ -117,13 +117,13 @@ async fn decide(state: &Arc<AppState>, method: &str, params: &Value, trusted: bo
                             (a, r, l, Some(c))
                         } else {
                             gwmark!("decide ERROR fail-closed (fail #{})", f);
-                            (false, format!("classifier error: {} (fail closed)", e), "ERROR", Some("unclassified".into()))
+                            (false, format!("classifier error: {} (fail closed)", e), "ERROR", Some("other".into()))
                         }
                     }
                 },
                 None => match heuristic_decide(method, params) {
                     Some((a, r, l, c)) => { gwmark!("decide HEURISTIC (no key) allow={}", a); (a, r, l, Some(c)) }
-                    None => { gwmark!("decide NOKEY fail-closed"); (false, "no rule match + no LLM key (fail closed)".into(), "RULES", Some("unclassified".into())) }
+                    None => { gwmark!("decide NOKEY fail-closed"); (false, "no rule match + no LLM key (fail closed)".into(), "RULES", Some("other".into())) }
                 }
             }
             }

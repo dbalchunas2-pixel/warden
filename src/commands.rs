@@ -243,8 +243,18 @@ pub fn get_status(state: State<'_, Arc<AppState>>) -> Value {
         let mut b = state.llm_bucket.lock().unwrap_or_else(|e| e.into_inner());
         (b.available(), b.burst, b.refill_per_sec)
     };
+    let model = state
+        .config
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .get("nebius")
+        .and_then(|n| n.get("model"))
+        .and_then(|m| m.as_str())
+        .unwrap_or("nvidia/Nemotron-3_5-Lightning")
+        .to_string();
     json!({
         "proxy_running": state.proxy_running.load(Ordering::SeqCst),
+        "model": model,
         "proxy_status": proxy_status,
         "upstream": upstream,
         "llm_enabled": llm_enabled,
@@ -1107,7 +1117,8 @@ fn sh_quote(s: &str) -> String {
 /// (older RULES-layer blocks wrote a null category).
 pub(crate) fn infer_category(reason: &str, layer: &str) -> &'static str {
     let h = format!("{} {}", reason, layer).to_lowercase();
-    if h.contains("id_rsa") || h.contains(".ssh") || h.contains("credential") || h.contains("shadow")
+    if h.contains("rm ") || h.contains("dd of") || h.contains("halt") || h.contains("kill -9")
+        || h.contains("id_rsa") || h.contains(".ssh") || h.contains("credential") || h.contains("shadow")
         || h.contains(".env") || h.contains("netrc") || h.contains("gnupg") || h.contains(".kube")
         || h.contains("password") || h.contains("secret") { "credential_access" }
     else if h.contains("rm -rf") || h.contains("dd if") || h.contains("mkfs") || h.contains("/dev/sd")
