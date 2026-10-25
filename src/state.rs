@@ -234,7 +234,7 @@ impl AppState {
     pub fn upstream_from_config(&self) -> Option<String> {
         self.config
             .read()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .get("upstream_command")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
