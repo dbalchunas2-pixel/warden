@@ -6,3 +6,6 @@ warden-audit.jsonl
 warden.toml
 target/
 *.dmg
+*.rej
+*.b64
+examples/
