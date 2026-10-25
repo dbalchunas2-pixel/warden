@@ -71,7 +71,7 @@ fn parse_args() -> (Option<String>, Option<String>) {
                 upstream = args.get(i).cloned();
             }
             "--version" | "-V" => {
-                println!("warden 0.2.0");
+                println!("warden 0.6.0");
                 std::process::exit(0);
             }
             "--help" | "-h" => {
