@@ -49,6 +49,9 @@ pub struct AppState {
     pub cum_stats: Mutex<CumulativeStats>,
     pub call_windows: Mutex<std::collections::HashMap<String, Vec<u64>>>,
     pub outbreak_servers: Mutex<std::collections::HashSet<String>>,
+    /// Deployment-specific threat categories the LLM invented at runtime
+    /// (standard categories live in classify::STANDARD_CATEGORIES).
+    pub categories: Mutex<Vec<String>>,
 }
 
 impl AppState {
@@ -127,7 +130,7 @@ impl AppState {
                 });
             sp.to_string_lossy().to_string()
         };
-        let (baseline, cum_stats) = load_persistent_state(&state_path);
+        let (baseline, cum_stats, known_cats) = load_persistent_state(&state_path);
 
         let st = Self {
             entries: Mutex::new(VecDeque::with_capacity(1000)),
@@ -155,6 +158,7 @@ impl AppState {
             cum_stats: Mutex::new(cum_stats),
             call_windows: Mutex::new(std::collections::HashMap::new()),
             outbreak_servers: Mutex::new(std::collections::HashSet::new()),
+            categories: Mutex::new(known_cats),
         };
         st.load_audit_history();
         {
@@ -255,6 +259,33 @@ impl AppState {
             if count > 0 {
                 info!("Restored {} audit entries from {}", count, self.audit_path);
             }
+            // Backfill threat categories on legacy entries so every call in
+            // the dashboard counts toward a real category, not "unclassified".
+            let mut ev = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+            let mut backfilled = 0usize;
+            for e in ev.iter_mut() {
+                let has_cat = e.get("category").and_then(|v| v.as_str())
+                    .map(|s| !s.trim().is_empty()).unwrap_or(false);
+                if has_cat { continue; }
+                let verdict = e.get("verdict").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let reason = e.get("reason").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let layer = e.get("layer").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let extracted = reason.find("category: ").and_then(|pos| {
+                    reason[pos + 10..].split(|c| c == ' ' || c == '.' || c == ',').next()
+                        .map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+                });
+                let cat = extracted.unwrap_or_else(|| {
+                    if verdict == "allowed" { "safe".to_string() }
+                    else { crate::commands::infer_category(&reason, &layer).to_string() }
+                });
+                if let Some(obj) = e.as_object_mut() {
+                    obj.insert("category".to_string(), Value::String(cat));
+                    backfilled += 1;
+                }
+            }
+            if backfilled > 0 {
+                info!("Backfilled {} legacy audit entries with inferred threat categories", backfilled);
+            }
         }
     }
 
@@ -278,6 +309,28 @@ impl AppState {
 
     pub fn clear_verdict_cache(&self) {
         self.verdict_cache.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    }
+
+    /// Register a threat category observed at runtime. Returns true if it was
+    /// novel (not a standard label, not seen before). Persists immediately.
+    pub fn register_category(&self, cat: &str) -> bool {
+        let c = cat.trim();
+        if c.is_empty() || crate::classify::STANDARD_CATEGORIES.contains(&c) { return false; }
+        {
+            let mut cats = self.categories.lock().unwrap_or_else(|e| e.into_inner());
+            if cats.iter().any(|k| k == c) { return false; }
+            cats.push(c.to_string());
+        }
+        self.save_state();
+        info!("New threat category registered: {}", c);
+        true
+    }
+
+    /// Full category list (standard + deployment-specific) for the LLM prompt.
+    pub fn known_categories(&self) -> Vec<String> {
+        let mut v: Vec<String> = crate::classify::STANDARD_CATEGORIES.iter().map(|s| s.to_string()).collect();
+        v.extend(self.categories.lock().unwrap_or_else(|e| e.into_inner()).iter().cloned());
+        v
     }
 
     pub async fn classify_cached(&self, method: &str, params: &Value, api_key: &str) -> Result<crate::classify::Classification> {
@@ -306,7 +359,9 @@ impl AppState {
             }
         } else { None };
         let threshold = self.confidence_threshold;
-        let c = crate::classify::classify_with_tier(method, params, api_key, tier, threshold, session_ctx).await?;
+        let known = self.known_categories();
+        let c = crate::classify::classify_with_tier(method, params, api_key, tier, threshold, session_ctx, &known).await?;
+        self.register_category(&c.category);
         self.verdict_cache.lock().unwrap_or_else(|e| e.into_inner()).insert(k, c.clone());
         Ok(c)
     }
@@ -375,7 +430,7 @@ impl AppState {
             if verdict == "allowed" { cs.total_allowed += 1; }
             if verdict == "blocked" { cs.total_blocked += 1; }
             if cs.total_calls % 10 == 0 {
-                save_persistent_state(&self.state_path, &self.baseline.lock().unwrap_or_else(|e| e.into_inner()), &cs);
+                save_persistent_state(&self.state_path, &self.baseline.lock().unwrap_or_else(|e| e.into_inner()), &cs, &self.categories.lock().unwrap_or_else(|e| e.into_inner()));
             }
         }
     }
@@ -394,7 +449,7 @@ impl AppState {
     }
 
     pub fn save_state(&self) {
-        save_persistent_state(&self.state_path, &self.baseline.lock().unwrap_or_else(|e| e.into_inner()), &self.cum_stats.lock().unwrap_or_else(|e| e.into_inner()));
+        save_persistent_state(&self.state_path, &self.baseline.lock().unwrap_or_else(|e| e.into_inner()), &self.cum_stats.lock().unwrap_or_else(|e| e.into_inner()), &self.categories.lock().unwrap_or_else(|e| e.into_inner()));
     }
 
     pub fn start_proxy(self: &Arc<Self>, cmd: &str) -> Result<()> {
@@ -528,7 +583,7 @@ impl AppState {
     }
 }
 
-fn load_persistent_state(path: &str) -> (HashMap<String, (u64, String)>, CumulativeStats) {
+fn load_persistent_state(path: &str) -> (HashMap<String, (u64, String)>, CumulativeStats, Vec<String>) {
     match std::fs::read_to_string(path) {
         Ok(content) => {
             let v: Value = serde_json::from_str(&content).unwrap_or(Value::Null);
@@ -542,15 +597,19 @@ fn load_persistent_state(path: &str) -> (HashMap<String, (u64, String)>, Cumulat
                 .unwrap_or_default();
             let cum = v.get("cumulative").cloned().unwrap_or(Value::Null);
             let cum_stats: CumulativeStats = if cum.is_null() { CumulativeStats::default() } else { serde_json::from_value(cum).unwrap_or_default() };
-            (baseline, cum_stats)
+            let known_cats = v.get("known_categories")
+                .and_then(|k| k.as_array())
+                .map(|a| a.iter().filter_map(|x| x.as_str()).map(|s| s.to_string()).collect())
+                .unwrap_or_default();
+            (baseline, cum_stats, known_cats)
         }
-        Err(_) => (HashMap::new(), CumulativeStats::default())
+        Err(_) => (HashMap::new(), CumulativeStats::default(), Vec::new())
     }
 }
 
-fn save_persistent_state(path: &str, baseline: &HashMap<String, (u64, String)>, cum: &CumulativeStats) {
+fn save_persistent_state(path: &str, baseline: &HashMap<String, (u64, String)>, cum: &CumulativeStats, cats: &[String]) {
     let bl_json: serde_json::Map<String, Value> = baseline.iter().map(|(k, (count, first_seen))| (k.clone(), json!({"count": count, "first_seen": first_seen}))).collect();
-    let state = json!({"baseline": Value::Object(bl_json), "cumulative": cum, "saved_at": chrono::Utc::now().to_rfc3339()});
+    let state = json!({"baseline": Value::Object(bl_json), "cumulative": cum, "known_categories": cats, "saved_at": chrono::Utc::now().to_rfc3339()});
     let _ = std::fs::write(path, serde_json::to_string_pretty(&state).unwrap_or_default());
 }
 
@@ -735,7 +794,7 @@ async fn proxy_loop(state: Arc<AppState>, upstream_cmd: String) -> Result<()> {
                                         info!("LLM ALLOW: {}", reason);
                                         forward(&mut child_stdin, &line).await?;
                                         state.last_call_ms.store(call_start.elapsed().as_millis() as u64, Ordering::SeqCst);
-                        state.push_event(&method, &params, "allowed", &format!("LLM: {}", reason), "llm");
+                        state.push_event_c(&method, &params, "allowed", &format!("LLM: {}", reason), "llm", Some(&c.category));
                                     } else {
                                         warn!("LLM BLOCK: {}", reason);
                                         let msg = format!("Blocked by LLM: {}", reason);
@@ -743,7 +802,7 @@ async fn proxy_loop(state: Arc<AppState>, upstream_cmd: String) -> Result<()> {
                                         stdout.write_all(err.as_bytes()).await?;
                                         stdout.flush().await?;
                                         state.last_call_ms.store(call_start.elapsed().as_millis() as u64, Ordering::SeqCst);
-                        state.push_event(&method, &params, "blocked", &msg, "llm");
+                        state.push_event_c(&method, &params, "blocked", &msg, "llm", Some(&c.category));
                             state.notify_block("Warden blocked a tool call", &msg);
                                         continue;
                                     }
