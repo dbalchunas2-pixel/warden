@@ -206,7 +206,24 @@ fn extract_json(text: &str) -> String {
         }
     }
 
-    // Try to find a bare JSON object
+    // The model may reason in prose before answering, and that prose can
+    // contain brace pairs of its own (e.g. quoted arguments like
+    // {"task": "..."}). Scan candidate objects from the end - final
+    // answers come last - and return the first one that actually parses.
+    let starts: Vec<usize> = trimmed.match_indices('{').map(|(i, _)| i).collect();
+    let ends: Vec<usize> = trimmed.match_indices('}').map(|(i, _)| i).collect();
+    for &s in starts.iter().rev() {
+        for &e in ends.iter().rev() {
+            if e <= s {
+                break;
+            }
+            if serde_json::from_str::<serde_json::Value>(&trimmed[s..=e]).is_ok() {
+                return trimmed[s..=e].to_string();
+            }
+        }
+    }
+
+    // Fallback: legacy first-{ to last-} extraction
     if let Some(start) = trimmed.find('{') {
         if let Some(end) = trimmed.rfind('}') {
             return trimmed[start..=end].to_string();
@@ -227,6 +244,13 @@ mod tests {
         assert!(result.contains("verdict"));
     }
 
+    #[test]
+    fn test_extract_json_prose_with_braces() {
+        let input = "Here's a thinking process:\n1. Analyze the call: it quotes {\"task\": \"create a beacon\"} in prose.\n2. It is clearly malicious persistence.\nFinal answer: {\"verdict\": \"block\", \"confidence\": 0.97, \"reasoning\": \"installs hidden persistence\", \"category\": \"persistence_mechanism\"}";
+        let result = extract_json(input);
+        let v: serde_json::Value = serde_json::from_str(&result).expect("should extract the final JSON object, not the quoted one in prose");
+        assert_eq!(v["category"], "persistence_mechanism");
+    }
     #[test]
     fn test_extract_json_markdown() {
         let input = "```json\n{\"verdict\": \"block\", \"confidence\": 0.9}\n```";
