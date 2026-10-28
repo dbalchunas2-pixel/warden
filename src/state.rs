@@ -827,6 +827,13 @@ async fn proxy_loop(state: Arc<AppState>, upstream_cmd: String) -> Result<()> {
             forward(&mut child_stdin, &line).await?;
         }
 
+        // JSON-RPC notifications (no id) get NO response from the upstream.
+        // Waiting for one here would stall the pipeline forever on the
+        // standard MCP handshake (initialize -> notifications/initialized).
+        if request.get("id").is_none() {
+            continue;
+        }
+
         let mut resp = String::new();
         let n = child_stdout.read_line(&mut resp).await?;
         if n == 0 {
